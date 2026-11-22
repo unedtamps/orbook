@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Orbook Benchmark &amp; Profile Report — {{.RunID}}</title>
+<style>
+  :root {
+    --bg: #0d1117; --card: #161b22; --card2: #1c2128; --border: #30363d; --text: #e6edf3;
+    --muted: #8b949e; --accent: #58a6ff; --green: #3fb950; --red: #f85149; --amber: #d29922; --purple: #bc8cff;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 24px; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; line-height: 1.5; }
+  .wrap { max-width: 1360px; margin: 0 auto; }
+  h1, h2, h3 { margin: 0 0 12px; font-weight: 600; }
+  h1 { font-size: 24px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  h2 { font-size: 18px; margin-top: 28px; border-bottom: 1px solid var(--border); padding-bottom: 6px; display: flex; align-items: center; justify-content: space-between; }
+  h3 { font-size: 14px; color: var(--text); }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 12px; font-weight: 600; background: #1f6feb33; color: var(--accent); border: 1px solid #1f6feb66; }
+  .badge.green { background: #23863633; color: var(--green); border-color: #23863666; }
+  .badge.red { background: #da363333; color: var(--red); border-color: #da363366; }
+  .badge.amber { background: #9e6a0333; color: var(--amber); border-color: #9e6a0366; }
+  .badge.purple { background: #8957e533; color: var(--purple); border-color: #8957e566; }
+  .meta { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 14px; margin-bottom: 20px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; }
+  .kpi-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  .kpi-val { font-size: 22px; font-weight: 700; margin-top: 4px; }
+  .kpi-sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .controls { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+  select, input, button { background: var(--card2); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; font-size: 13px; }
+  button { cursor: pointer; transition: background 0.15s, border-color 0.15s; }
+  button:hover { background: #262c36; border-color: var(--accent); }
+  button.active { background: #1f6feb33; border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  .btn-sm { padding: 4px 8px; font-size: 12px; }
+  .bar-row { display: grid; grid-template-columns: 240px 1fr 140px; gap: 10px; align-items: center; margin: 5px 0; font-size: 12.5px; }
+  .bar-track { background: #21262d; border-radius: 4px; height: 16px; overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 4px; background: linear-gradient(90deg, #1f6feb, #58a6ff); transition: width 0.2s; }
+  .bar-fill.best { background: linear-gradient(90deg, #238636, #3fb950); }
+  .bar-fill.b-side { background: linear-gradient(90deg, #8957e5, #bc8cff); }
+  .bar-fill.mem { background: linear-gradient(90deg, #9e6a03, #d29922); }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; font-size: 13px; margin-bottom: 16px; }
+  th, td { padding: 7px 10px; text-align: left; border-bottom: 1px solid var(--border); }
+  th { background: var(--card2); color: var(--muted); font-weight: 600; font-size: 11.5px; text-transform: uppercase; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tr:hover td { background: var(--card2); }
+  .faster { color: var(--green); font-weight: 600; }
+  .slower { color: var(--red); font-weight: 600; }
+  .alloc-chg { color: var(--amber); font-weight: 600; }
+  .muted { color: var(--muted); }
+
+  /* Side-by-side comparison layout */
+  .sbs-headline { display: grid; grid-template-columns: 1fr auto 1fr; gap: 14px; align-items: center; margin: 14px 0; }
+  .sbs-box { background: var(--card2); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
+  .sbs-box.side-a { border-left: 3px solid var(--accent); }
+  .sbs-box.side-b { border-left: 3px solid var(--purple); }
+  .sbs-verdict { text-align: center; padding: 8px 14px; }
+  .sbs-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 12px; }
+  .sbs-prof-row { display: grid; grid-template-columns: minmax(0, 1fr) 90px 100px; gap: 8px; align-items: center; margin: 5px 0; font-size: 12px; }
+  .fn-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dual-bar { display: flex; flex-direction: column; gap: 3px; min-width: 140px; }
+  .dual-bar .bar-track { height: 8px; }
+  .cmd-hint { font-size: 11.5px; color: var(--muted); background: #0d1117; padding: 6px 8px; border-radius: 4px; border: 1px solid var(--border); margin-top: 8px; overflow-x: auto; }
+  @media (max-width: 900px) {
+    .sbs-headline, .sbs-cols { grid-template-columns: 1fr; }
+    .bar-row { grid-template-columns: 150px 1fr 110px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>
+    Orbook Benchmark &amp; Profile Report
+    <span class="badge">{{.RunID}}</span>
+    <span class="badge">{{.Mode}}</span>
+  </h1>
+  <div class="meta" id="meta-line"></div>
+
+  <div class="grid" id="kpi-grid"></div>
+
+  <div id="diff-section" style="display:none;">
+    <h2>Diff vs Previous Version</h2>
+    <table>
+      <thead><tr><th>Benchmark</th><th>Status</th><th class="num">Old (ns/op)</th><th class="num">New (ns/op)</th><th class="num">Delta</th><th class="num">Bytes/op</th><th class="num">Allocs/op</th></tr></thead>
+      <tbody id="diff-body"></tbody>
+    </table>
+  </div>
+
+  <!-- Side-by-Side Comparison -->
+  <div id="sbs-section">
+    <h2>
+      <span>Side-by-Side Variant Comparison</span>
+      <span class="muted" style="font-size:12px;font-weight:400;">Compare timing, allocations, HDR latency &amp; pprof hotspots</span>
+    </h2>
+    <div class="card">
+      <div class="controls">
+        <label class="kpi-label">Method:</label>
+        <select id="sbs-method"></select>
+        <label class="kpi-label" style="color:var(--accent);">Variant A:</label>
+        <select id="sbs-var-a"></select>
+        <button id="sbs-swap" class="btn-sm" title="Swap A and B">⇄</button>
+        <label class="kpi-label" style="color:var(--purple);">Variant B:</label>
+        <select id="sbs-var-b"></select>
+      </div>
+      <div class="controls" id="sbs-presets">
+        <span class="kpi-label">Quick compare:</span>
+        <button class="btn-sm" data-preset="fastest-slowest">Fastest vs Slowest</button>
+        <button class="btn-sm" data-preset="pool-nopool">Pool vs NoPool</button>
+        <button class="btn-sm" data-preset="ladder-btree">Ladder vs BTree</button>
+        <button class="btn-sm" data-preset="ladder-rbtree">Ladder vs RBTree</button>
+        <button class="btn-sm" data-preset="btree-rbtree">BTree vs RBTree</button>
+        <button class="btn-sm" data-preset="ladder-sorted">Ladder vs SortedSlice</button>
+        <button class="btn-sm" data-preset="ll-rb">LinkedList vs RingBuffer</button>
+      </div>
+
+      <div class="sbs-headline" id="sbs-headline"></div>
+
+      <div style="margin-top:16px;">
+        <div class="controls" style="justify-content:space-between;">
+          <h3 style="margin:0;">Profiling Hotspots Side-by-Side (<span id="sbs-prof-method" class="mono"></span>)</h3>
+          <div class="controls" style="margin:0;" id="sbs-prof-tabs">
+            <button class="btn-sm active" data-metric="cpu_flat">CPU Flat%</button>
+            <button class="btn-sm" data-metric="cpu_cum">CPU Cum%</button>
+            <button class="btn-sm" data-metric="mem_space">Mem Space</button>
+            <button class="btn-sm" data-metric="mem_obj">Mem Objects</button>
+          </div>
+        </div>
+        <div class="sbs-cols" id="sbs-prof-cols"></div>
+      </div>
+
+      <div style="margin-top:20px;">
+        <h3>All Methods Matrix: <span id="sbs-matrix-title" class="mono"></span></h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Method</th>
+              <th class="num" style="color:var(--accent);">Variant A (ns/op)</th>
+              <th class="num" style="color:var(--purple);">Variant B (ns/op)</th>
+              <th class="num">Delta (A vs B)</th>
+              <th>Visual Ratio</th>
+              <th class="num">Allocs (A / B)</th>
+            </tr>
+          </thead>
+          <tbody id="sbs-matrix-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <h2>Method Ranking Chart</h2>
+  <div class="card">
+    <div class="controls">
+      <label for="method-select" class="kpi-label">Method:</label>
+      <select id="method-select"></select>
+    </div>
+    <div id="method-chart"></div>
+  </div>
+
+  <div id="hdr-section" style="display:none;">
+    <h2>HDR Histogram Latency (Mixed Workload)</h2>
+    <table>
+      <thead><tr><th>Variant</th><th class="num">Throughput (ops/s)</th><th class="num">Avg (ns)</th><th class="num">p50</th><th class="num">p90</th><th class="num">p99</th><th class="num">p99.9</th><th class="num">Max</th></tr></thead>
+      <tbody id="hdr-body"></tbody>
+    </table>
+  </div>
+
+  <h2>All Benchmarks</h2>
+  <div class="controls">
+    <input id="bench-filter" type="text" placeholder="Filter benchmarks (e.g. ladder, pool, Cancel)..." style="min-width: 300px;">
+  </div>
+  <table>
+    <thead><tr><th>Method</th><th>Variant</th><th class="num">ns/op</th><th class="num">B/op</th><th class="num">allocs/op</th><th class="num">Profiled</th></tr></thead>
+    <tbody id="bench-body"></tbody>
+  </table>
+
+  <div id="prof-section" style="display:none;">
+    <h2>Profile Explorer</h2>
+    <div class="card">
+      <div class="controls">
+        <label class="kpi-label">Profiled Benchmark:</label>
+        <select id="prof-select" style="min-width:360px;"></select>
+      </div>
+      <div id="prof-detail"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const DATA = {{.JSONData}};
+const BENCH_MAP = new Map(DATA.benchmarks.map(b => [b.full_name, b]));
+const PROF_MAP = new Map((DATA.profiles || []).map(p => [p.benchmark, p]));
+const HDR_MAP = new Map((DATA.latency || []).map(l => [l.variant, l]));
+
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+document.getElementById('meta-line').textContent =
+  `Commit: ${DATA.meta.git_commit} | Go: ${DATA.meta.go_version} | CPU: ${DATA.meta.cpu || 'n/a'} | BenchTime: ${DATA.meta.bench_time} | Time: ${DATA.meta.timestamp}`;
+
+// KPI Cards
+(function renderKPIs() {
+  const kpis = [];
+  kpis.push({ label: 'Version', val: `v${String(DATA.version).padStart(3,'0')}`, sub: DATA.run_id });
+  kpis.push({ label: 'Benchmarks / Profiles', val: `${DATA.benchmarks.length} / ${(DATA.profiles || []).length}`, sub: `Mode: ${DATA.mode}` });
+
+  const mixed = DATA.benchmarks.filter(b => b.method === 'BenchmarkMixedWorkload');
+  if (mixed.length > 0) {
+    const best = mixed.reduce((a, b) => a.ns_per_op < b.ns_per_op ? a : b);
+    kpis.push({ label: 'Fastest MixedWorkload', val: `${best.ns_per_op.toFixed(1)} ns/op`, sub: best.variant });
+  }
+  if (DATA.latency && DATA.latency.length > 0) {
+    const bestP999 = DATA.latency.reduce((a, b) => a.p999_ns < b.p999_ns ? a : b);
+    kpis.push({ label: 'Best p99.9 Latency', val: `${bestP999.p999_ns} ns`, sub: bestP999.variant });
+  }
+  if (DATA.diff) {
+    kpis.push({
+      label: 'Diff Status',
+      val: DATA.diff.has_diff ? `${DATA.diff.changed_count} chg / ${DATA.diff.added_count} add` : 'No diff',
+      sub: DATA.diff.base_run_id ? `vs ${DATA.diff.base_run_id}` : 'initial version'
+    });
+  }
+  const grid = document.getElementById('kpi-grid');
+  kpis.forEach(k => {
+    const el = document.createElement('div');
+    el.className = 'card';
+    el.innerHTML = `<div class="kpi-label">${esc(k.label)}</div><div class="kpi-val">${esc(k.val)}</div><div class="kpi-sub mono">${esc(k.sub)}</div>`;
+    grid.appendChild(el);
+  });
+})();
+
+// Diff Table
+if (DATA.diff && DATA.diff.items && DATA.diff.items.length > 0) {
+  const changed = DATA.diff.items.filter(d => d.status !== 'unchanged');
+  if (changed.length > 0) {
+    document.getElementById('diff-section').style.display = 'block';
+    const tbody = document.getElementById('diff-body');
+    changed.forEach(d => {
+      const cls = d.status === 'faster' ? 'faster' : (d.status === 'slower' ? 'slower' : (d.status === 'alloc_changed' ? 'alloc-chg' : ''));
+      const delta = d.status === 'added' ? '—' : `${d.delta_ns_pct >= 0 ? '+' : ''}${d.delta_ns_pct.toFixed(2)}%`;
+      const oldNs = d.status === 'added' ? '—' : d.old_ns.toFixed(2);
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td class="mono">${esc(d.full_name)}</td><td><span class="badge ${d.status==='faster'?'green':d.status==='slower'?'red':'amber'}">${esc(d.status)}</span></td>` +
+        `<td class="num mono">${oldNs}</td><td class="num mono">${d.new_ns.toFixed(2)}</td><td class="num mono ${cls}">${delta}</td>` +
+        `<td class="num mono">${d.old_bytes} → ${d.new_bytes}</td><td class="num mono">${d.old_allocs} → ${d.new_allocs}</td>`;
+      tbody.appendChild(tr);
+    });
+  }
+}
+
+// Side-by-Side Comparison
+(function setupSideBySide() {
+  const methods = [...new Set(DATA.benchmarks.map(b => b.method))];
+  const allVariants = [...new Set(DATA.benchmarks.map(b => b.variant))];
+  if (methods.length === 0 || allVariants.length === 0) {
+    document.getElementById('sbs-section').style.display = 'none';
+    return;
+  }
+
+  const mSel = document.getElementById('sbs-method');
+  const aSel = document.getElementById('sbs-var-a');
+  const bSel = document.getElementById('sbs-var-b');
+  let activeProfMetric = 'cpu_flat';
+
+  methods.forEach(m => {
+    const opt = document.createElement('option');
+    opt.value = m; opt.textContent = m;
+    mSel.appendChild(opt);
+  });
+  if (methods.includes('BenchmarkMixedWorkload')) mSel.value = 'BenchmarkMixedWorkload';
+
+  function variantsForMethod(m) {
+    return DATA.benchmarks.filter(b => b.method === m).map(b => b.variant);
+  }
+
+  function populateVariantSelectors(keepSelection) {
+    const m = mSel.value;
+    const vars = variantsForMethod(m);
+    const prevA = aSel.value;
+    const prevB = bSel.value;
+    aSel.innerHTML = '';
+    bSel.innerHTML = '';
+    vars.forEach(v => {
+      const o1 = document.createElement('option'); o1.value = v; o1.textContent = v; aSel.appendChild(o1);
+      const o2 = document.createElement('option'); o2.value = v; o2.textContent = v; bSel.appendChild(o2);
+    });
+    if (keepSelection && vars.includes(prevA) && vars.includes(prevB)) {
+      aSel.value = prevA;
+      bSel.value = prevB;
+    } else {
+      const rows = DATA.benchmarks.filter(b => b.method === m).sort((x, y) => x.ns_per_op - y.ns_per_op);
+      if (rows.length >= 2) {
+        aSel.value = rows[0].variant;
+        bSel.value = rows[rows.length - 1].variant;
+      } else if (rows.length === 1) {
+        aSel.value = rows[0].variant;
+        bSel.value = rows[0].variant;
+      }
+    }
+  }
+
+  function findBench(method, variant) {
+    return BENCH_MAP.get(variant === 'default' ? method : `${method}/${variant}`);
+  }
+  function findProfile(method, variant) {
+    return PROF_MAP.get(variant === 'default' ? method : `${method}/${variant}`);
+  }
+
+  function renderProfileColumn(title, sideClass, method, variant) {
+    const p = findProfile(method, variant);
+    const fullName = variant === 'default' ? method : `${method}/${variant}`;
+    if (!p) {
+      return `<div class="sbs-box ${sideClass}">
+        <h3 class="mono">${esc(title)}</h3>
+        <div class="muted" style="font-size:12.5px;">No profile captured for this variant yet.</div>
+        <div class="cmd-hint mono">make report-one BENCH=${esc(fullName)}</div>
+      </div>`;
+    }
+
+    let entries = [];
+    let isCum = false;
+    let barCls = sideClass === 'side-a' ? '' : 'b-side';
+    if (activeProfMetric === 'cpu_flat') { entries = p.cpu_top || []; }
+    else if (activeProfMetric === 'cpu_cum') { entries = [...(p.cpu_top || [])].sort((a,b) => b.cum_pct - a.cum_pct); isCum = true; }
+    else if (activeProfMetric === 'mem_space') { entries = p.mem_space_top || []; barCls = 'mem'; }
+    else if (activeProfMetric === 'mem_obj') { entries = p.mem_objects_top || []; barCls = 'mem'; }
+
+    let rowsHtml = '';
+    if (entries.length === 0) {
+      rowsHtml = `<div class="muted" style="font-size:12.5px;">No samples recorded (0 allocations or below sampling threshold).</div>`;
+    } else {
+      entries.slice(0, 10).forEach(e => {
+        const pct = isCum ? e.cum_pct : e.flat_pct;
+        const val = isCum ? e.cum : e.flat;
+        rowsHtml += `<div class="sbs-prof-row">
+          <div class="mono fn-name" title="${esc(e.func)}">${esc(e.func)}</div>
+          <div class="bar-track"><div class="bar-fill ${barCls}" style="width:${Math.min(pct,100).toFixed(1)}%"></div></div>
+          <div class="num mono">${esc(val)} (${pct.toFixed(1)}%)</div>
+        </div>`;
+      });
+    }
+
+    const profPath = (activeProfMetric.startsWith('cpu') ? p.cpu_file : p.mem_file) || '';
+    const cmdLine = profPath ? `<div class="cmd-hint mono">go tool pprof -http=:6060 reports/${esc(profPath)}</div>` : '';
+    return `<div class="sbs-box ${sideClass}">
+      <h3 class="mono">${esc(title)}</h3>
+      ${rowsHtml}
+      ${cmdLine}
+    </div>`;
+  }
+
+  function renderSBS() {
+    const m = mSel.value;
+    const va = aSel.value;
+    const vb = bSel.value;
+    const ba = findBench(m, va);
+    const bb = findBench(m, vb);
+
+    // Headline comparison
+    const headline = document.getElementById('sbs-headline');
+    if (ba && bb) {
+      const hdrA = HDR_MAP.get(va);
+      const hdrB = HDR_MAP.get(vb);
+      const ratio = bb.ns_per_op / Math.max(ba.ns_per_op, 0.001);
+      const deltaPct = ((ba.ns_per_op - bb.ns_per_op) / Math.max(bb.ns_per_op, 0.001)) * 100;
+      let verdictHtml = '';
+      if (va === vb) {
+        verdictHtml = `<span class="badge">Same Variant</span>`;
+      } else if (ba.ns_per_op < bb.ns_per_op) {
+        verdictHtml = `<div class="faster" style="font-size:18px;">A is ${ratio.toFixed(2)}× faster</div><div class="muted mono">${deltaPct.toFixed(1)}% ns/op</div>`;
+      } else if (bb.ns_per_op < ba.ns_per_op) {
+        const inv = ba.ns_per_op / Math.max(bb.ns_per_op, 0.001);
+        verdictHtml = `<div class="slower" style="font-size:18px;">B is ${inv.toFixed(2)}× faster</div><div class="muted mono">+${deltaPct.toFixed(1)}% ns/op</div>`;
+      } else {
+        verdictHtml = `<span class="badge">Tie</span>`;
+      }
+
+      const hdrHtml = (h) => h
+        ? `<div class="kpi-sub mono" style="margin-top:6px;">HDR: ${(h.throughput_ops_per_sec/1e6).toFixed(2)}M ops/s | p50=${h.p50_ns}ns p99=${h.p99_ns}ns p99.9=${h.p999_ns}ns</div>`
+        : '';
+
+      headline.innerHTML = `
+        <div class="sbs-box side-a">
+          <div class="kpi-label" style="color:var(--accent);">Variant A · ${esc(m)}</div>
+          <div class="kpi-val mono">${ba.ns_per_op.toFixed(2)} ns/op</div>
+          <div class="kpi-sub mono">${esc(va)} · ${ba.bytes_per_op} B/op · ${ba.allocs_per_op} allocs/op</div>
+          ${hdrHtml(hdrA)}
+        </div>
+        <div class="sbs-verdict">${verdictHtml}</div>
+        <div class="sbs-box side-b">
+          <div class="kpi-label" style="color:var(--purple);">Variant B · ${esc(m)}</div>
+          <div class="kpi-val mono">${bb.ns_per_op.toFixed(2)} ns/op</div>
+          <div class="kpi-sub mono">${esc(vb)} · ${bb.bytes_per_op} B/op · ${bb.allocs_per_op} allocs/op</div>
+          ${hdrHtml(hdrB)}
+        </div>`;
+    }
+
+    // Side-by-side profiling hotspots
+    document.getElementById('sbs-prof-method').textContent = m;
+    document.getElementById('sbs-prof-cols').innerHTML =
+      renderProfileColumn(`A: ${va}`, 'side-a', m, va) +
+      renderProfileColumn(`B: ${vb}`, 'side-b', m, vb);
+
+    // All-methods matrix for Variant A vs Variant B
+    document.getElementById('sbs-matrix-title').textContent = `${va} vs ${vb}`;
+    const tbody = document.getElementById('sbs-matrix-body');
+    tbody.innerHTML = '';
+    methods.forEach(method => {
+      const ra = findBench(method, va);
+      const rb = findBench(method, vb);
+      if (!ra && !rb) return;
+      const aNs = ra ? ra.ns_per_op : 0;
+      const bNs = rb ? rb.ns_per_op : 0;
+      const maxNs = Math.max(aNs, bNs, 0.001);
+      let deltaHtml = '—';
+      if (ra && rb && bNs > 0) {
+        const d = ((aNs - bNs) / bNs) * 100;
+        const cls = d < -1 ? 'faster' : (d > 1 ? 'slower' : 'muted');
+        const mult = aNs <= bNs ? `${(bNs/Math.max(aNs,0.001)).toFixed(2)}× A` : `${(aNs/Math.max(bNs,0.001)).toFixed(2)}× B`;
+        deltaHtml = `<span class="${cls}">${d >= 0 ? '+' : ''}${d.toFixed(1)}% (${mult})</span>`;
+      }
+      const tr = document.createElement('tr');
+      if (method === m) tr.style.background = '#1f6feb18';
+      tr.innerHTML = `
+        <td class="mono">${esc(method)}</td>
+        <td class="num mono">${ra ? aNs.toFixed(2) : '—'}</td>
+        <td class="num mono">${rb ? bNs.toFixed(2) : '—'}</td>
+        <td class="num mono">${deltaHtml}</td>
+        <td>
+          <div class="dual-bar">
+            <div class="bar-track"><div class="bar-fill" style="width:${((aNs/maxNs)*100).toFixed(1)}%"></div></div>
+            <div class="bar-track"><div class="bar-fill b-side" style="width:${((bNs/maxNs)*100).toFixed(1)}%"></div></div>
+          </div>
+        </td>
+        <td class="num mono">${ra ? ra.allocs_per_op : '—'} / ${rb ? rb.allocs_per_op : '—'}</td>`;
+      tbody.appendChild(tr);
+    });
+  }
+
+  mSel.addEventListener('change', () => { populateVariantSelectors(true); renderSBS(); });
+  aSel.addEventListener('change', renderSBS);
+  bSel.addEventListener('change', renderSBS);
+  document.getElementById('sbs-swap').addEventListener('click', () => {
+    const tmp = aSel.value; aSel.value = bSel.value; bSel.value = tmp; renderSBS();
+  });
+
+  document.querySelectorAll('#sbs-prof-tabs button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#sbs-prof-tabs button').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      activeProfMetric = btn.dataset.metric;
+      renderSBS();
+    });
+  });
+
+  document.querySelectorAll('#sbs-presets button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const m = mSel.value;
+      const vars = variantsForMethod(m);
+      const pick = (a, b) => {
+        if (vars.includes(a) && vars.includes(b)) { aSel.value = a; bSel.value = b; renderSBS(); }
+      };
+      const p = btn.dataset.preset;
+      if (p === 'fastest-slowest') {
+        const rows = DATA.benchmarks.filter(b => b.method === m).sort((x, y) => x.ns_per_op - y.ns_per_op);
+        if (rows.length >= 2) { aSel.value = rows[0].variant; bSel.value = rows[rows.length-1].variant; renderSBS(); }
+      } else if (p === 'pool-nopool') {
+        pick('ladder_linkedlist_pool', 'ladder_linkedlist_nopool');
+      } else if (p === 'ladder-btree') {
+        pick('ladder_linkedlist_pool', 'btree_linkedlist_pool');
+      } else if (p === 'ladder-rbtree') {
+        pick('ladder_linkedlist_pool', 'rbtree_linkedlist_pool');
+      } else if (p === 'btree-rbtree') {
+        pick('btree_linkedlist_pool', 'rbtree_linkedlist_pool');
+      } else if (p === 'ladder-sorted') {
+        pick('ladder_linkedlist_pool', 'sortedslice_linkedlist_pool');
+      } else if (p === 'll-rb') {
+        pick('ladder_linkedlist_pool', 'ladder_ringbuffer_pool');
+      }
+    });
+  });
+
+  populateVariantSelectors(false);
+  renderSBS();
+})();
+
+// Method Ranking Chart
+(function setupMethodChart() {
+  const methods = [...new Set(DATA.benchmarks.map(b => b.method))];
+  const sel = document.getElementById('method-select');
+  methods.forEach(m => {
+    const opt = document.createElement('option');
+    opt.value = m; opt.textContent = m;
+    sel.appendChild(opt);
+  });
+  if (methods.includes('BenchmarkMixedWorkload')) sel.value = 'BenchmarkMixedWorkload';
+
+  function draw() {
+    const m = sel.value;
+    const rows = DATA.benchmarks.filter(b => b.method === m).sort((a, b) => a.ns_per_op - b.ns_per_op);
+    const maxNs = Math.max(...rows.map(r => r.ns_per_op), 1);
+    const container = document.getElementById('method-chart');
+    container.innerHTML = '';
+    rows.forEach((r, idx) => {
+      const pct = (r.ns_per_op / maxNs) * 100;
+      const div = document.createElement('div');
+      div.className = 'bar-row';
+      div.innerHTML = `<div class="mono">${esc(r.variant)}</div>` +
+        `<div class="bar-track"><div class="bar-fill ${idx===0?'best':''}" style="width:${pct.toFixed(1)}%"></div></div>` +
+        `<div class="num mono">${r.ns_per_op.toFixed(2)} ns (${r.allocs_per_op}a)</div>`;
+      container.appendChild(div);
+    });
+  }
+  sel.addEventListener('change', draw);
+  if (methods.length > 0) draw();
+})();
+
+// HDR Table
+if (DATA.latency && DATA.latency.length > 0) {
+  document.getElementById('hdr-section').style.display = 'block';
+  const tbody = document.getElementById('hdr-body');
+  DATA.latency.forEach(l => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td class="mono">${esc(l.variant)}</td><td class="num mono">${Math.round(l.throughput_ops_per_sec).toLocaleString()}</td>` +
+      `<td class="num mono">${l.avg_ns.toFixed(1)}</td><td class="num mono">${l.p50_ns}</td><td class="num mono">${l.p90_ns}</td>` +
+      `<td class="num mono">${l.p99_ns}</td><td class="num mono">${l.p999_ns}</td><td class="num mono">${l.max_ns}</td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+// All Benchmarks Table
+(function setupBenchTable() {
+  const input = document.getElementById('bench-filter');
+  const tbody = document.getElementById('bench-body');
+  function render() {
+    const q = input.value.trim().toLowerCase();
+    tbody.innerHTML = '';
+    DATA.benchmarks.filter(b => !q || b.full_name.toLowerCase().includes(q)).forEach(b => {
+      const hasProf = PROF_MAP.has(b.full_name);
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td class="mono">${esc(b.method)}</td><td class="mono">${esc(b.variant)}</td>` +
+        `<td class="num mono">${b.ns_per_op.toFixed(2)}</td><td class="num mono">${b.bytes_per_op}</td><td class="num mono">${b.allocs_per_op}</td>` +
+        `<td class="num">${hasProf ? '<span class="badge green">yes</span>' : '<span class="muted">—</span>'}</td>`;
+      tbody.appendChild(tr);
+    });
+  }
+  input.addEventListener('input', render);
+  render();
+})();
+
+// Profile Explorer (single profile full view)
+if (DATA.profiles && DATA.profiles.length > 0) {
+  document.getElementById('prof-section').style.display = 'block';
+  const sel = document.getElementById('prof-select');
+  const detail = document.getElementById('prof-detail');
+  DATA.profiles.forEach(p => {
+    const opt = document.createElement('option');
+    opt.value = p.benchmark; opt.textContent = p.benchmark;
+    sel.appendChild(opt);
+  });
+
+  function renderProfileTable(title, entries, barCls) {
+    if (!entries || entries.length === 0) return '';
+    let html = `<h3 style="margin-top:14px;">${esc(title)}</h3><table><thead><tr><th>Function</th><th class="num">Flat</th><th class="num">Flat%</th><th class="num">Cum</th><th class="num">Cum%</th></tr></thead><tbody>`;
+    entries.forEach(e => {
+      html += `<tr><td class="mono">${esc(e.func)}</td><td class="num mono">${esc(e.flat)}</td><td class="num mono">${e.flat_pct.toFixed(2)}%</td><td class="num mono">${esc(e.cum)}</td><td class="num mono">${e.cum_pct.toFixed(2)}%</td></tr>`;
+    });
+    html += `</tbody></table>`;
+    return html;
+  }
+
+  function drawProf() {
+    const p = PROF_MAP.get(sel.value);
+    if (!p) return;
+    let cmds = '';
+    if (p.cpu_file) cmds += `<div class="cmd-hint mono">CPU pprof UI: go tool pprof -http=:6060 reports/${esc(p.cpu_file)}</div>`;
+    if (p.mem_file) cmds += `<div class="cmd-hint mono">Mem pprof UI: go tool pprof -http=:6060 reports/${esc(p.mem_file)}</div>`;
+    detail.innerHTML = cmds +
+      renderProfileTable('CPU Top Hotspots', p.cpu_top, '') +
+      renderProfileTable('Memory Alloc Space Top', p.mem_space_top, 'mem') +
+      renderProfileTable('Memory Alloc Objects Top', p.mem_objects_top, 'mem');
+  }
+  sel.addEventListener('change', drawProf);
+  drawProf();
+}
+</script>
+</body>
+</html>

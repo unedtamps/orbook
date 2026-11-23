@@ -1,6 +1,6 @@
 package queue
 
-import "github.com/nedo/orbook/book"
+import "github.com/unedtamps/orbook/book"
 
 // LinkedList is an intrusive doubly-linked FIFO queue backed by Order.Prev and Order.Next.
 // All operations (PushBack, Front, PopFront, Remove) are O(1) with zero per-queue slice allocation.

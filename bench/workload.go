@@ -3,7 +3,7 @@ package bench
 import (
 	"math/rand"
 
-	"github.com/nedo/orbook/book"
+	"github.com/unedtamps/orbook/book"
 )
 
 // OpKind distinguishes operations in a pre-generated Workload stream.

@@ -4,8 +4,8 @@ import (
 	"math/rand"
 	"testing"
 
-	"github.com/nedo/orbook/book"
-	"github.com/nedo/orbook/book/queue"
+	"github.com/unedtamps/orbook/book"
+	"github.com/unedtamps/orbook/book/queue"
 )
 
 func TestQueuesBasicOperations(t *testing.T) {

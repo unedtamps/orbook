@@ -5,7 +5,7 @@ import (
 	"math/rand"
 	"testing"
 
-	"github.com/nedo/orbook/book"
+	"github.com/unedtamps/orbook/book"
 )
 
 type diffOp struct {
@@ -37,6 +37,16 @@ func TestDifferentialAllImplementations(t *testing.T) {
 		books[i] = buildBook(t, cfg, v)
 		evBufs[i] = make([]book.Event, 0, 32)
 	}
+	fastBk, err := book.NewFastBook(cfg, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fastEvs := make([]book.Event, 0, 32)
+	arenaBk, err := book.NewArenaBook(cfg, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	arenaEvs := make([]book.Event, 0, 32)
 
 	rng := rand.New(rand.NewSource(20261122))
 	const totalOps = 25000
@@ -139,7 +149,7 @@ func TestDifferentialAllImplementations(t *testing.T) {
 			nextID++
 		}
 
-		// Execute op across all 12 implementations.
+		// Execute op across all 16 Book variants + FastBook.
 		for i, b := range books {
 			if op.isCancel {
 				evBufs[i] = b.CancelOrder(op.cancelID, evBufs[i][:0])
@@ -147,9 +157,30 @@ func TestDifferentialAllImplementations(t *testing.T) {
 				evBufs[i] = b.PlaceOrder(op.req, evBufs[i][:0])
 			}
 		}
+		if op.isCancel {
+			fastEvs = fastBk.CancelOrder(op.cancelID, fastEvs[:0])
+			arenaEvs = arenaBk.CancelOrder(op.cancelID, arenaEvs[:0])
+		} else {
+			fastEvs = fastBk.PlaceOrder(op.req, fastEvs[:0])
+			arenaEvs = arenaBk.PlaceOrder(op.req, arenaEvs[:0])
+		}
 
-		// Assert identical event streams across all 12 implementations.
+		// Assert identical event streams across all implementations.
 		refEvs := evBufs[0]
+		if len(fastEvs) != len(refEvs) {
+			t.Fatalf("step %d: FastBook produced %d events, ref produced %d", step, len(fastEvs), len(refEvs))
+		}
+		if len(arenaEvs) != len(refEvs) {
+			t.Fatalf("step %d: ArenaBook produced %d events, ref produced %d", step, len(arenaEvs), len(refEvs))
+		}
+		for j := range refEvs {
+			if fastEvs[j] != refEvs[j] {
+				t.Fatalf("step %d: FastBook event[%d] mismatch:\ngot=%+v\nref=%+v", step, j, fastEvs[j], refEvs[j])
+			}
+			if arenaEvs[j] != refEvs[j] {
+				t.Fatalf("step %d: ArenaBook event[%d] mismatch:\ngot=%+v\nref=%+v", step, j, arenaEvs[j], refEvs[j])
+			}
+		}
 		for i := 1; i < len(books); i++ {
 			got := evBufs[i]
 			if len(got) != len(refEvs) {
@@ -218,6 +249,13 @@ func TestDifferentialAllImplementations(t *testing.T) {
 	refTop := books[0].TopOfBook()
 	refStats := books[0].Stats()
 	refBids, refAsks := books[0].Depth(1000, nil, nil)
+
+	if fastBk.TopOfBook() != refTop || fastBk.Stats() != refStats {
+		t.Fatalf("final FastBook top/stats mismatch: top=%+v stats=%+v", fastBk.TopOfBook(), fastBk.Stats())
+	}
+	if arenaBk.TopOfBook() != refTop || arenaBk.Stats() != refStats {
+		t.Fatalf("final ArenaBook top/stats mismatch: top=%+v stats=%+v", arenaBk.TopOfBook(), arenaBk.Stats())
+	}
 
 	for i, b := range books {
 		if err := b.CheckInvariants(); err != nil {

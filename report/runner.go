@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nedo/orbook/bench"
+	"github.com/unedtamps/orbook/bench"
 )
 
 // RunOptions configures a report generation run (full or single-benchmark).

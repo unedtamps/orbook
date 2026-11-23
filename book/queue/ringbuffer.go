@@ -1,6 +1,6 @@
 package queue
 
-import "github.com/nedo/orbook/book"
+import "github.com/unedtamps/orbook/book"
 
 const defaultRingCap = 8
 

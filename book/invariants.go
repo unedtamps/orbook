@@ -23,8 +23,8 @@ func (b *Book) CheckInvariants() error {
 		return err
 	}
 
-	if seen != len(b.orders) {
-		return fmt.Errorf("invariant violated: orders in levels (%d) != len(b.orders) (%d)", seen, len(b.orders))
+	if seen != b.orders.Len() {
+		return fmt.Errorf("invariant violated: orders in levels (%d) != len(b.orders) (%d)", seen, b.orders.Len())
 	}
 	return nil
 }
@@ -95,7 +95,7 @@ func (b *Book) checkSide(side Side, levels PriceLevels, totalSeen *int) error {
 				checkErr = fmt.Errorf("invariant violated: order %d invalid leaves %d (qty=%d)", o.ID, o.Leaves, o.Qty)
 				return false
 			}
-			indexed, ok := b.orders[o.ID]
+			indexed, ok := b.orders.Get(o.ID)
 			if !ok || indexed != o {
 				checkErr = fmt.Errorf("invariant violated: order %d missing or mismatched in b.orders", o.ID)
 				return false

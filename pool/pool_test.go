@@ -3,8 +3,8 @@ package pool_test
 import (
 	"testing"
 
-	"github.com/nedo/orbook/book"
-	"github.com/nedo/orbook/pool"
+	"github.com/unedtamps/orbook/book"
+	"github.com/unedtamps/orbook/pool"
 )
 
 func TestFreeListReuseAndZeroing(t *testing.T) {

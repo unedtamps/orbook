@@ -9,7 +9,7 @@ type Book struct {
 	cfg      Config
 	bids     PriceLevels
 	asks     PriceLevels
-	orders   map[OrderID]*Order
+	orders   orderMap
 	pool     OrderPool
 	orderSeq uint64
 	eventSeq uint64
@@ -35,7 +35,7 @@ func New(cfg Config, bids, asks PriceLevels, orderPool OrderPool) (*Book, error)
 		cfg:    cfg,
 		bids:   bids,
 		asks:   asks,
-		orders: make(map[OrderID]*Order, 1024),
+		orders: newOrderMap(orderMapInitCap),
 		pool:   orderPool,
 	}, nil
 }
@@ -162,7 +162,7 @@ func (b *Book) PlaceOrder(req OrderRequest, events []Event) []Event {
 
 			if maker.Leaves == 0 {
 				bestLvl.PopFront()
-				delete(b.orders, maker.ID)
+				b.orders.Delete(maker.ID)
 
 				b.eventSeq++
 				events = append(events, Event{
@@ -236,14 +236,14 @@ func (b *Book) PlaceOrder(req OrderRequest, events []Event) []Event {
 
 	lvl := own.GetOrCreate(price)
 	lvl.Add(o)
-	b.orders[o.ID] = o
+	b.orders.Set(o.ID, o)
 	return events
 }
 
 // CancelOrder cancels an active resting order by ID.
 // If the order is not found, an EventRejected(RejectOrderNotFound) is appended.
 func (b *Book) CancelOrder(id OrderID, events []Event) []Event {
-	o, ok := b.orders[id]
+	o, ok := b.orders.Delete(id)
 	if !ok {
 		b.eventSeq++
 		return append(events, Event{
@@ -263,7 +263,6 @@ func (b *Book) CancelOrder(id OrderID, events []Event) []Event {
 			b.asks.Remove(o.Price)
 		}
 	}
-	delete(b.orders, id)
 
 	b.eventSeq++
 	events = append(events, Event{
@@ -296,7 +295,7 @@ func (b *Book) validateOrder(req OrderRequest) RejectReason {
 	if req.Qty <= 0 {
 		return RejectInvalidQty
 	}
-	if req.Qty%b.cfg.LotSize != 0 {
+	if b.cfg.LotSize != 1 && req.Qty%b.cfg.LotSize != 0 {
 		return RejectNonLotQty
 	}
 	if req.Type == Limit {
@@ -306,11 +305,11 @@ func (b *Book) validateOrder(req OrderRequest) RejectReason {
 		if req.Price < b.cfg.MinPrice || req.Price > b.cfg.MaxPrice {
 			return RejectOutOfPriceBand
 		}
-		if (req.Price-b.cfg.MinPrice)%b.cfg.TickSize != 0 {
+		if b.cfg.TickSize != 1 && (req.Price-b.cfg.MinPrice)%b.cfg.TickSize != 0 {
 			return RejectOffTickPrice
 		}
 	}
-	if _, exists := b.orders[req.ID]; exists {
+	if b.orders.Has(req.ID) {
 		return RejectDuplicateOrderID
 	}
 	return RejectNone
@@ -360,7 +359,7 @@ func (b *Book) Depth(n int, bidsDst, asksDst []DepthLevel) (bids []DepthLevel, a
 
 // OrderCount returns the number of currently resting orders.
 func (b *Book) OrderCount() int {
-	return len(b.orders)
+	return b.orders.Len()
 }
 
 // BidLevelCount returns the number of active bid price levels.
@@ -379,7 +378,7 @@ func (b *Book) Stats() BookStats {
 		OrderSeq:     b.orderSeq,
 		EventSeq:     b.eventSeq,
 		TradeSeq:     b.tradeSeq,
-		ActiveOrders: len(b.orders),
+		ActiveOrders: b.orders.Len(),
 		BidLevels:    b.bids.Len(),
 		AskLevels:    b.asks.Len(),
 	}
@@ -387,8 +386,7 @@ func (b *Book) Stats() BookStats {
 
 // HasOrder reports whether an order with id is currently resting on the book.
 func (b *Book) HasOrder(id OrderID) bool {
-	_, ok := b.orders[id]
-	return ok
+	return b.orders.Has(id)
 }
 
 // Reset clears all resting orders and resets sequence counters while retaining
@@ -398,10 +396,10 @@ func (b *Book) Reset() {
 	// queues (LinkedList) and intrusive pools (FreeList) share Order.Next.
 	b.bids.Reset()
 	b.asks.Reset()
-	for _, o := range b.orders {
+	b.orders.ForEach(func(o *Order) {
 		b.pool.Put(o)
-	}
-	clear(b.orders)
+	})
+	b.orders.Clear()
 	b.orderSeq = 0
 	b.eventSeq = 0
 	b.tradeSeq = 0

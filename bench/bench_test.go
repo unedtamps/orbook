@@ -6,9 +6,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/nedo/orbook/bench"
-	"github.com/nedo/orbook/book"
-	"github.com/nedo/orbook/engine"
+	"github.com/unedtamps/orbook/bench"
+	"github.com/unedtamps/orbook/book"
+	"github.com/unedtamps/orbook/engine"
 )
 
 var (
@@ -503,8 +503,145 @@ func BenchmarkEngineChannel(b *testing.B) {
 			b.StartTimer()
 		}
 	}
-	b.StopTimer()
 	eng.Stop()
+	b.StopTimer()
+	sinkInt64 = totalEvents
+}
+
+func BenchmarkEngineBatch(b *testing.B) {
+	w := getSharedWorkload()
+	v := bench.Variant{Name: "ladder_linkedlist_pool", Levels: "ladder", Queue: "linkedlist", Pool: true}
+	bk, err := v.NewBook(w.Config, len(w.Warmup)+32768)
+	if err != nil {
+		b.Fatal(err)
+	}
+	evBuf := make([]book.Event, 0, 64)
+	evBuf = w.ApplyWarmup(bk, evBuf)
+	for i := range w.Ops {
+		evBuf = bench.ReplayOp(bk, &w.Ops[i], evBuf)
+	}
+	bk.Reset()
+
+	// Pre-convert workload into slices of 64 Commands so benchmark measures pure batched transport + matching.
+	const batchSize = 64
+	nOps := len(w.Ops)
+	allCmds := make([]engine.Command, nOps)
+	for i := range w.Ops {
+		op := &w.Ops[i]
+		if op.Kind == bench.OpCancel {
+			allCmds[i] = engine.Command{Type: engine.CmdCancelOrder, OrderID: op.CancelID}
+		} else {
+			allCmds[i] = engine.Command{Type: engine.CmdPlaceOrder, Order: op.Req}
+		}
+	}
+	warmupCmds := make([]engine.Command, len(w.Warmup))
+	for i := range w.Warmup {
+		warmupCmds[i] = engine.Command{Type: engine.CmdPlaceOrder, Order: w.Warmup[i].Req}
+	}
+
+	var totalEvents int64
+	startBatchEngine := func() *engine.BatchEngine {
+		be := engine.NewBatchEngine(bk, engine.Options{
+			QueueSize: 512,
+			EventHandler: func(events []book.Event) {
+				totalEvents += int64(len(events))
+			},
+		})
+		be.Start()
+		be.SubmitBatch(warmupCmds)
+		ch := make(chan engine.Response, 1)
+		be.SubmitBatch([]engine.Command{{Type: engine.CmdStats, Reply: ch}})
+		<-ch
+		return be
+	}
+
+	be := startBatchEngine()
+	idx := 0
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; {
+		rem := b.N - i
+		end := idx + batchSize
+		if end > nOps {
+			end = nOps
+		}
+		if end-idx > rem {
+			end = idx + rem
+		}
+		be.SubmitBatch(allCmds[idx:end])
+		i += end - idx
+		idx = end
+		if idx == nOps && i < b.N {
+			b.StopTimer()
+			be.Stop()
+			bk.Reset()
+			be = startBatchEngine()
+			idx = 0
+			b.StartTimer()
+		}
+	}
+	be.Stop()
+	b.StopTimer()
+	sinkInt64 = totalEvents
+}
+
+func BenchmarkEngineDisruptor(b *testing.B) {
+	w := getSharedWorkload()
+	v := bench.Variant{Name: "ladder_linkedlist_pool", Levels: "ladder", Queue: "linkedlist", Pool: true}
+	bk, err := v.NewBook(w.Config, len(w.Warmup)+32768)
+	if err != nil {
+		b.Fatal(err)
+	}
+	evBuf := make([]book.Event, 0, 64)
+	evBuf = w.ApplyWarmup(bk, evBuf)
+	for i := range w.Ops {
+		evBuf = bench.ReplayOp(bk, &w.Ops[i], evBuf)
+	}
+	bk.Reset()
+
+	var totalEvents int64
+	startDisruptor := func() *engine.Disruptor {
+		d := engine.NewDisruptor(bk, engine.Options{
+			QueueSize: 8192,
+			EventHandler: func(events []book.Event) {
+				totalEvents += int64(len(events))
+			},
+		})
+		d.Start()
+		for i := range w.Warmup {
+			d.PlaceOrderAsync(w.Warmup[i].Req)
+		}
+		_ = d.Stats()
+		return d
+	}
+
+	d := startDisruptor()
+	ops := w.Ops
+	nOps := len(ops)
+	idx := 0
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		op := &ops[idx]
+		if op.Kind == bench.OpCancel {
+			d.CancelOrderAsync(op.CancelID)
+		} else {
+			d.PlaceOrderAsync(op.Req)
+		}
+		idx++
+		if idx == nOps {
+			b.StopTimer()
+			d.Stop()
+			bk.Reset()
+			d = startDisruptor()
+			idx = 0
+			b.StartTimer()
+		}
+	}
+	d.Stop()
+	b.StopTimer()
 	sinkInt64 = totalEvents
 }
 

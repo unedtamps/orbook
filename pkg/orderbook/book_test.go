@@ -1,0 +1,219 @@
+package orderbook
+
+import (
+	"math/rand"
+	"testing"
+	"unsafe"
+)
+
+func testCfg() Config {
+	return Config{
+		Symbol:   "BBCA",
+		TickSize: 25,
+		LotSize:  100,
+		MinPrice: 5000,
+		MaxPrice: 15000,
+	}
+}
+
+func TestStructSizesNoscan(t *testing.T) {
+	if sz := unsafe.Sizeof(arenaOrder{}); sz != 64 {
+		t.Fatalf("arenaOrder size = %d, want 64", sz)
+	}
+	if sz := unsafe.Sizeof(priceLevel{}); sz != 32 {
+		t.Fatalf("priceLevel size = %d, want 32", sz)
+	}
+	if sz := unsafe.Sizeof(mapSlot{}); sz != 16 {
+		t.Fatalf("mapSlot size = %d, want 16", sz)
+	}
+}
+
+func TestConfigValidation(t *testing.T) {
+	bad := []Config{
+		{TickSize: 0, LotSize: 100, MinPrice: 1000, MaxPrice: 2000},
+		{TickSize: 25, LotSize: 0, MinPrice: 1000, MaxPrice: 2000},
+		{TickSize: 25, LotSize: 100, MinPrice: 0, MaxPrice: 2000},
+		{TickSize: 25, LotSize: 100, MinPrice: 2000, MaxPrice: 1000},
+		{TickSize: 25, LotSize: 100, MinPrice: 1000, MaxPrice: 1010},
+	}
+	for i, c := range bad {
+		if _, err := New(c); err == nil {
+			t.Errorf("case %d: expected error for %+v", i, c)
+		}
+	}
+}
+
+func TestMatchingSTPGetOrderAndReset(t *testing.T) {
+	b, err := New(testCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var evs []Event
+
+	// Reject off-tick & non-lot.
+	evs = b.PlaceOrder(OrderRequest{ID: 1, TraderID: 1, Side: Buy, Type: Limit, Price: 10010, Qty: 100}, evs[:0])
+	if len(evs) != 1 || evs[0].RejectReason != RejectOffTickPrice {
+		t.Fatalf("expected RejectOffTickPrice, got %+v", evs)
+	}
+	evs = b.PlaceOrder(OrderRequest{ID: 1, TraderID: 1, Side: Buy, Type: Limit, Price: 10000, Qty: 150}, evs[:0])
+	if len(evs) != 1 || evs[0].RejectReason != RejectNonLotQty {
+		t.Fatalf("expected RejectNonLotQty, got %+v", evs)
+	}
+
+	// Rest two asks at 10000 (Trader 1 then Trader 2) and one at 10025.
+	b.PlaceOrder(OrderRequest{ID: 10, TraderID: 1, Side: Sell, Type: Limit, Price: 10000, Qty: 200}, evs[:0])
+	b.PlaceOrder(OrderRequest{ID: 11, TraderID: 2, Side: Sell, Type: Limit, Price: 10000, Qty: 300}, evs[:0])
+	b.PlaceOrder(OrderRequest{ID: 12, TraderID: 3, Side: Sell, Type: Limit, Price: 10025, Qty: 400}, evs[:0])
+
+	// Verify GetOrder.
+	snap, ok := b.GetOrder(11)
+	if !ok || snap.ID != 11 || snap.Price != 10000 || snap.Leaves != 300 || snap.TraderID != 2 {
+		t.Fatalf("unexpected GetOrder(11): %+v ok=%v", snap, ok)
+	}
+	if _, ok := b.GetOrder(999); ok {
+		t.Fatalf("expected GetOrder(999) == false")
+	}
+
+	// Trader 2 aggressively buys 400 at 10025 -> fills 200 vs Trader 1 (#10), then hits STP on own #11!
+	evs = b.PlaceOrder(OrderRequest{ID: 20, TraderID: 2, Side: Buy, Type: Limit, Price: 10025, Qty: 400}, evs[:0])
+	if len(evs) != 4 || evs[1].Type != EventTrade || evs[1].MakerOrderID != 10 || evs[1].Qty != 200 ||
+		evs[2].Type != EventDone || evs[3].Type != EventCancelled || evs[3].CancelReason != CancelSTP || evs[3].Qty != 200 {
+		t.Fatalf("unexpected STP events: %+v", evs)
+	}
+	if b.HasOrder(10) || !b.HasOrder(11) || b.HasOrder(20) {
+		t.Fatalf("unexpected resting state after STP")
+	}
+
+	// Market Buy for 1000 sweeps #11 (300) + #12 (400), cancels 300 unfilled.
+	evs = b.PlaceOrder(OrderRequest{ID: 21, TraderID: 9, Side: Buy, Type: Market, Qty: 1000}, evs[:0])
+	last := evs[len(evs)-1]
+	if last.Type != EventCancelled || last.CancelReason != CancelMarketUnfilled || last.Qty != 300 {
+		t.Fatalf("unexpected market unfilled tail: %+v", last)
+	}
+	if b.OrderCount() != 0 {
+		t.Fatalf("expected empty book, got %d", b.OrderCount())
+	}
+
+	// Reset and confirm clean counters.
+	b.Reset()
+	if st := b.Stats(); st.OrderSeq != 0 || st.EventSeq != 0 || st.TradeSeq != 0 || st.ActiveOrders != 0 {
+		t.Fatalf("expected zeroed stats after Reset, got %+v", st)
+	}
+}
+
+func TestCallbackMatchesSliceIdentically(t *testing.T) {
+	cfg := testCfg()
+	bSlice, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bCB, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rng := rand.New(rand.NewSource(42))
+	var sliceEvs, cbEvs []Event
+	var nextID OrderID = 1
+
+	for step := 0; step < 5000; step++ {
+		sliceEvs = sliceEvs[:0]
+		cbEvs = cbEvs[:0]
+
+		if rng.Intn(100) < 30 && nextID > 1 {
+			cid := OrderID(rng.Intn(int(nextID-1)) + 1)
+			sliceEvs = bSlice.CancelOrder(cid, sliceEvs)
+			bCB.CancelOrderWithCallback(cid, func(ev Event) {
+				cbEvs = append(cbEvs, ev)
+			})
+		} else {
+			side := Buy
+			if rng.Intn(2) == 1 {
+				side = Sell
+			}
+			oType := Limit
+			if rng.Intn(10) == 0 {
+				oType = Market
+			}
+			req := OrderRequest{
+				ID:       nextID,
+				TraderID: TraderID(rng.Intn(6) + 1),
+				Side:     side,
+				Type:     oType,
+				Price:    9900 + int64(rng.Intn(9))*25,
+				Qty:      int64(rng.Intn(5)+1) * 100,
+			}
+			nextID++
+			sliceEvs = bSlice.PlaceOrder(req, sliceEvs)
+			bCB.PlaceOrderWithCallback(req, func(ev Event) {
+				cbEvs = append(cbEvs, ev)
+			})
+		}
+
+		if len(sliceEvs) != len(cbEvs) {
+			t.Fatalf("step %d: len mismatch %d vs %d", step, len(sliceEvs), len(cbEvs))
+		}
+		for i := range sliceEvs {
+			if sliceEvs[i] != cbEvs[i] {
+				t.Fatalf("step %d: event[%d] mismatch:\nslice=%+v\ncb=%+v", step, i, sliceEvs[i], cbEvs[i])
+			}
+		}
+	}
+
+	if bSlice.TopOfBook() != bCB.TopOfBook() || bSlice.Stats() != bCB.Stats() {
+		t.Fatalf("final state mismatch: top=%+v/%+v stats=%+v/%+v",
+			bSlice.TopOfBook(), bCB.TopOfBook(), bSlice.Stats(), bCB.Stats())
+	}
+}
+
+func TestZeroAllocSteadyState(t *testing.T) {
+	b, err := New(testCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	evBuf := make([]Event, 0, 16)
+	bidsBuf := make([]DepthLevel, 0, 16)
+	asksBuf := make([]DepthLevel, 0, 16)
+
+	var nextID OrderID = 1
+	allocs := testing.AllocsPerRun(500, func() {
+		id := nextID
+		nextID++
+		evBuf = b.PlaceOrder(OrderRequest{ID: id, TraderID: 1, Side: Buy, Type: Limit, Price: 10000, Qty: 100}, evBuf[:0])
+		evBuf = b.CancelOrder(id, evBuf[:0])
+		_, _, _ = b.BestBid()
+		bidsBuf, asksBuf = b.Depth(5, bidsBuf, asksBuf)
+	})
+	if allocs != 0 {
+		t.Fatalf("PlaceOrder/CancelOrder steady-state allocs = %.2f, want 0", allocs)
+	}
+
+	var cbCount int
+	cb := func(_ Event) { cbCount++ }
+	cbAllocs := testing.AllocsPerRun(500, func() {
+		id := nextID
+		nextID++
+		b.PlaceOrderWithCallback(OrderRequest{ID: id, TraderID: 1, Side: Buy, Type: Limit, Price: 10000, Qty: 100}, cb)
+		b.CancelOrderWithCallback(id, cb)
+	})
+	if cbAllocs != 0 {
+		t.Fatalf("Callback API steady-state allocs = %.2f, want 0", cbAllocs)
+	}
+}
+
+func BenchmarkBookAddCancel(b *testing.B) {
+	cfg := Config{Symbol: "ACME", TickSize: 1, LotSize: 100, MinPrice: 10000, MaxPrice: 30000, InitialCapacity: 8192}
+	bk, err := New(cfg)
+	if err != nil {
+		b.Fatal(err)
+	}
+	evBuf := make([]Event, 0, 16)
+	var id OrderID = 1
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		evBuf = bk.PlaceOrder(OrderRequest{ID: id, TraderID: 1, Side: Buy, Type: Limit, Price: 20000, Qty: 100}, evBuf[:0])
+		evBuf = bk.CancelOrder(id, evBuf[:0])
+		id++
+	}
+}

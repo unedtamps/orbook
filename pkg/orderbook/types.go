@@ -54,6 +54,32 @@ func (t OrderType) String() string {
 	}
 }
 
+// TimeInForce controls how long an incoming order remains active.
+// Zero value is GTC (Good-Til-Cancelled) for full backward compatibility.
+type TimeInForce uint8
+
+const (
+	GTC      TimeInForce = iota // Good-Til-Cancelled: unfilled limit remainder rests on the book
+	IOC                         // Immediate-Or-Cancel: fill what you can now, cancel remainder
+	FOK                         // Fill-Or-Kill: fill 100% immediately or cancel with 0 trades
+	PostOnly                    // Maker-Only: cancel immediately if it would cross the spread
+)
+
+func (tif TimeInForce) String() string {
+	switch tif {
+	case GTC:
+		return "GTC"
+	case IOC:
+		return "IOC"
+	case FOK:
+		return "FOK"
+	case PostOnly:
+		return "POST_ONLY"
+	default:
+		return fmt.Sprintf("TimeInForce(%d)", tif)
+	}
+}
+
 // EventType identifies the kind of output event produced by the matching engine.
 type EventType uint8
 
@@ -63,6 +89,7 @@ const (
 	EventTrade
 	EventCancelled
 	EventDone
+	EventModified
 )
 
 func (e EventType) String() string {
@@ -77,12 +104,14 @@ func (e EventType) String() string {
 		return "CANCELLED"
 	case EventDone:
 		return "DONE"
+	case EventModified:
+		return "MODIFIED"
 	default:
 		return fmt.Sprintf("EventType(%d)", e)
 	}
 }
 
-// RejectReason explains why a place or cancel request was rejected.
+// RejectReason explains why a place, modify, or cancel request was rejected.
 type RejectReason uint8
 
 const (
@@ -91,12 +120,14 @@ const (
 	RejectDuplicateOrderID
 	RejectInvalidSide
 	RejectInvalidType
+	RejectInvalidTimeInForce
 	RejectInvalidQty
 	RejectNonLotQty
 	RejectInvalidPrice
 	RejectOutOfPriceBand
 	RejectOffTickPrice
 	RejectOrderNotFound
+	RejectNoChange
 )
 
 func (r RejectReason) String() string {
@@ -111,6 +142,8 @@ func (r RejectReason) String() string {
 		return "INVALID_SIDE"
 	case RejectInvalidType:
 		return "INVALID_TYPE"
+	case RejectInvalidTimeInForce:
+		return "INVALID_TIME_IN_FORCE"
 	case RejectInvalidQty:
 		return "INVALID_QTY"
 	case RejectNonLotQty:
@@ -123,6 +156,8 @@ func (r RejectReason) String() string {
 		return "OFF_TICK_PRICE"
 	case RejectOrderNotFound:
 		return "ORDER_NOT_FOUND"
+	case RejectNoChange:
+		return "NO_CHANGE"
 	default:
 		return fmt.Sprintf("RejectReason(%d)", r)
 	}
@@ -136,6 +171,9 @@ const (
 	CancelUser
 	CancelSTP
 	CancelMarketUnfilled
+	CancelIOC
+	CancelFOK
+	CancelPostOnly
 )
 
 func (r CancelReason) String() string {
@@ -148,6 +186,12 @@ func (r CancelReason) String() string {
 		return "SELF_TRADE_PREVENTION"
 	case CancelMarketUnfilled:
 		return "MARKET_UNFILLED"
+	case CancelIOC:
+		return "IOC_UNFILLED"
+	case CancelFOK:
+		return "FOK_UNFILLED"
+	case CancelPostOnly:
+		return "POST_ONLY_CROSS"
 	default:
 		return fmt.Sprintf("CancelReason(%d)", r)
 	}
@@ -191,12 +235,23 @@ func (c Config) NumTicks() int {
 
 // OrderRequest is the input payload for PlaceOrder / PlaceOrderWithCallback.
 type OrderRequest struct {
+	ID          OrderID
+	TraderID    TraderID
+	Side        Side
+	Type        OrderType
+	TimeInForce TimeInForce // Defaults to GTC (0).
+	Price       int64       // Required for Limit orders; ignored for Market orders.
+	Qty         int64
+}
+
+// ModifyRequest amends a resting limit order's price and/or remaining quantity (Leaves).
+//   - Decreasing NewQty at the same price preserves FIFO time priority.
+//   - Increasing NewQty or changing NewPrice loses time priority and re-matches if crossing.
+//   - Setting NewPrice == 0 keeps the current price; setting NewQty == 0 keeps current Leaves.
+type ModifyRequest struct {
 	ID       OrderID
-	TraderID TraderID
-	Side     Side
-	Type     OrderType
-	Price    int64 // Required for Limit orders; ignored for Market orders.
-	Qty      int64
+	NewPrice int64
+	NewQty   int64
 }
 
 // Event is a pointer-free value record emitted by matching operations.
@@ -261,8 +316,10 @@ type Stats struct {
 // and mocking. For maximum hot-path performance, callers may hold *Book directly.
 type OrderBook interface {
 	PlaceOrder(req OrderRequest, dst []Event) []Event
+	ModifyOrder(req ModifyRequest, dst []Event) []Event
 	CancelOrder(id OrderID, dst []Event) []Event
 	PlaceOrderWithCallback(req OrderRequest, fn func(Event))
+	ModifyOrderWithCallback(req ModifyRequest, fn func(Event))
 	CancelOrderWithCallback(id OrderID, fn func(Event))
 	BestBid() (price, qty int64, ok bool)
 	BestAsk() (price, qty int64, ok bool)

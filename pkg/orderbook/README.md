@@ -7,7 +7,7 @@ A self-contained, zero-dependency (Go stdlib only), single-ticker stock order bo
 - **FIFO Queue:** Intrusive doubly-linked list embedded directly in 64-byte arena order slots (O(1) push, pop, cancel).
 - **Order Index:** Flat open-addressed Fibonacci-hashed `orderMap` with single-probe backward-shift deletion (zero tombstones).
 - **Memory & GC:** Every internal table (`[]arenaOrder`, `[]priceLevel`, `[]mapSlot`, `[]uint64`) contains **zero Go pointers (`noscan`)**, achieving `0 B/op, 0 allocs/op` in steady state and O(1) GC mark time regardless of resting book depth.
-- **Matching Rules:** Price-Time (FIFO) priority, executes at maker price, Limit & Market orders, Cancel, and Cancel-Newest Self-Trade Prevention (for `TraderID != 0`).
+- **Matching Rules:** Price-Time (FIFO) priority, executes at maker price, Limit & Market orders, **Time-in-Force (`GTC`, `IOC`, `FOK`, `PostOnly`)**, **Modify/Amend** (qty reduction preserves FIFO priority; qty increase or price change loses priority and re-matches if crossing), Cancel, and Cancel-Newest Self-Trade Prevention (for `TraderID != 0`).
 
 ## Install
 
@@ -71,5 +71,5 @@ func main() {
 
 `orderbook.New(cfg)` returns concrete `*orderbook.Book`, which also satisfies the exported `orderbook.OrderBook` interface (for DI/mocking):
 
-- **Mutations:** `PlaceOrder(req, dst)`, `CancelOrder(id, dst)`, `PlaceOrderWithCallback(req, fn)`, `CancelOrderWithCallback(id, fn)`, `Reset()`
+- **Mutations:** `PlaceOrder(req, dst)`, `ModifyOrder(req, dst)`, `CancelOrder(id, dst)`, `PlaceOrderWithCallback(req, fn)`, `ModifyOrderWithCallback(req, fn)`, `CancelOrderWithCallback(id, fn)`, `Reset()`
 - **Queries:** `BestBid()`, `BestAsk()`, `TopOfBook()`, `Depth(n, bidsDst, asksDst)`, `GetOrder(id)`, `HasOrder(id)`, `OrderCount()`, `Stats()`, `Config()`

@@ -1,5 +1,7 @@
 package orderbook
 
+import "math/bits"
+
 const defaultInitialCapacity = 4096
 
 // Compile-time check that *Book implements the exported OrderBook interface.
@@ -80,6 +82,29 @@ func (b *Book) freeOrder(idx uint32) {
 	b.freeHead = idx
 }
 
+func (b *Book) validatePrice(price int64) RejectReason {
+	if price <= 0 {
+		return RejectInvalidPrice
+	}
+	if price < b.cfg.MinPrice || price > b.cfg.MaxPrice {
+		return RejectOutOfPriceBand
+	}
+	if b.cfg.TickSize != 1 && (price-b.cfg.MinPrice)%b.cfg.TickSize != 0 {
+		return RejectOffTickPrice
+	}
+	return RejectNone
+}
+
+func (b *Book) validateQty(qty int64) RejectReason {
+	if qty <= 0 {
+		return RejectInvalidQty
+	}
+	if b.cfg.LotSize != 1 && qty%b.cfg.LotSize != 0 {
+		return RejectNonLotQty
+	}
+	return RejectNone
+}
+
 func (b *Book) validateOrder(req OrderRequest) RejectReason {
 	if req.ID == 0 {
 		return RejectInvalidOrderID
@@ -90,21 +115,18 @@ func (b *Book) validateOrder(req OrderRequest) RejectReason {
 	if req.Type != Limit && req.Type != Market {
 		return RejectInvalidType
 	}
-	if req.Qty <= 0 {
-		return RejectInvalidQty
+	if req.TimeInForce > PostOnly {
+		return RejectInvalidTimeInForce
 	}
-	if b.cfg.LotSize != 1 && req.Qty%b.cfg.LotSize != 0 {
-		return RejectNonLotQty
+	if req.Type == Market && req.TimeInForce == PostOnly {
+		return RejectInvalidTimeInForce
+	}
+	if r := b.validateQty(req.Qty); r != RejectNone {
+		return r
 	}
 	if req.Type == Limit {
-		if req.Price <= 0 {
-			return RejectInvalidPrice
-		}
-		if req.Price < b.cfg.MinPrice || req.Price > b.cfg.MaxPrice {
-			return RejectOutOfPriceBand
-		}
-		if b.cfg.TickSize != 1 && (req.Price-b.cfg.MinPrice)%b.cfg.TickSize != 0 {
-			return RejectOffTickPrice
+		if r := b.validatePrice(req.Price); r != RejectNone {
+			return r
 		}
 	}
 	if b.orders.Has(req.ID) {
@@ -113,9 +135,86 @@ func (b *Book) validateOrder(req OrderRequest) RejectReason {
 	return RejectNone
 }
 
-// PlaceOrder validates, matches, and (for unfilled limit remainders) rests req.
+func wouldCross(opp *ladder, side Side, price int64) bool {
+	if opp.bestIdx < 0 {
+		return false
+	}
+	bestPrice := opp.slots[opp.bestIdx].price
+	if side == Buy {
+		return price >= bestPrice
+	}
+	return price <= bestPrice
+}
+
+// canFillFOK checks without mutating the book whether at least needQty can be
+// filled immediately against opp without hitting a self-trade (STP) blocker.
+func (b *Book) canFillFOK(opp *ladder, side Side, oType OrderType, limitPrice, needQty int64, traderID TraderID) bool {
+	if opp.bestIdx < 0 {
+		return false
+	}
+	var avail int64
+
+	checkLevel := func(lvl *priceLevel) (done bool, ok bool) {
+		if oType == Limit {
+			if side == Buy && lvl.price > limitPrice {
+				return true, false
+			}
+			if side == Sell && lvl.price < limitPrice {
+				return true, false
+			}
+		}
+		if traderID == 0 {
+			avail += lvl.totalQty
+			if avail >= needQty {
+				return true, true
+			}
+			return false, false
+		}
+		for idx := lvl.headIdx; idx != 0; idx = b.arena[idx].NextIdx {
+			maker := &b.arena[idx]
+			if maker.TraderID == traderID {
+				// STP Cancel-Newest would halt matching before reaching needQty.
+				return true, false
+			}
+			avail += maker.Leaves
+			if avail >= needQty {
+				return true, true
+			}
+		}
+		return false, false
+	}
+
+	if opp.side == Buy {
+		for w := opp.bestIdx >> 6; w >= 0; w-- {
+			word := opp.active[w]
+			for word != 0 {
+				bit := 63 - bits.LeadingZeros64(word)
+				word &^= uint64(1) << uint(bit)
+				done, ok := checkLevel(&opp.slots[(w<<6)|bit])
+				if done {
+					return ok
+				}
+			}
+		}
+	} else {
+		for w := opp.bestIdx >> 6; w < len(opp.active); w++ {
+			word := opp.active[w]
+			for word != 0 {
+				bit := bits.TrailingZeros64(word)
+				word &^= uint64(1) << uint(bit)
+				done, ok := checkLevel(&opp.slots[(w<<6)|bit])
+				if done {
+					return ok
+				}
+			}
+		}
+	}
+	return avail >= needQty
+}
+
+// PlaceOrder validates, matches, and (for unfilled GTC/PostOnly limit remainders) rests req.
+// Supports GTC, IOC, FOK, and PostOnly TimeInForce.
 // Produced events are appended to dst and the extended slice is returned.
-// Reuse dst[:0] across calls for 0 allocs/op, or pass nil for convenience.
 func (b *Book) PlaceOrder(req OrderRequest, dst []Event) []Event {
 	if reason := b.validateOrder(req); reason != RejectNone {
 		b.eventSeq++
@@ -161,109 +260,46 @@ func (b *Book) PlaceOrder(req OrderRequest, dst []Event) []Event {
 		own, opp = &b.asks, &b.bids
 	}
 
-	stpTriggered := false
-	for leaves > 0 {
-		bestIdx := opp.bestIdx
-		if bestIdx < 0 {
-			break
-		}
-		bestLvl := &opp.slots[bestIdx]
-		if req.Type == Limit {
-			if req.Side == Buy {
-				if bestLvl.price > price {
-					break
-				}
-			} else {
-				if bestLvl.price < price {
-					break
-				}
-			}
-		}
-
-		for leaves > 0 && bestLvl.headIdx != 0 {
-			makerIdx := bestLvl.headIdx
-			maker := &b.arena[makerIdx]
-
-			if req.TraderID != 0 && maker.TraderID == req.TraderID {
-				stpTriggered = true
-				b.eventSeq++
-				dst = append(dst, Event{
-					Seq:          b.eventSeq,
-					Type:         EventCancelled,
-					OrderID:      req.ID,
-					TraderID:     req.TraderID,
-					Side:         req.Side,
-					OrderType:    req.Type,
-					Price:        price,
-					Qty:          leaves,
-					Leaves:       0,
-					CancelReason: CancelSTP,
-				})
-				break
-			}
-
-			matchQty := leaves
-			if maker.Leaves < matchQty {
-				matchQty = maker.Leaves
-			}
-
-			leaves -= matchQty
-			maker.Leaves -= matchQty
-			bestLvl.totalQty -= matchQty
-
-			b.tradeSeq++
+	// PostOnly: cancel immediately if order would cross the spread.
+	if req.TimeInForce == PostOnly {
+		if wouldCross(opp, req.Side, price) {
 			b.eventSeq++
-			dst = append(dst, Event{
-				Seq:           b.eventSeq,
-				Type:          EventTrade,
-				TradeID:       b.tradeSeq,
-				OrderID:       req.ID,
-				TraderID:      req.TraderID,
-				MakerOrderID:  maker.ID,
-				MakerTraderID: maker.TraderID,
-				Side:          req.Side,
-				OrderType:     req.Type,
-				Price:         maker.Price,
-				Qty:           matchQty,
-				Leaves:        leaves,
-				MakerLeaves:   maker.Leaves,
+			return append(dst, Event{
+				Seq:          b.eventSeq,
+				Type:         EventCancelled,
+				OrderID:      req.ID,
+				TraderID:     req.TraderID,
+				Side:         req.Side,
+				OrderType:    req.Type,
+				Price:        price,
+				Qty:          leaves,
+				Leaves:       0,
+				CancelReason: CancelPostOnly,
 			})
-
-			if maker.Leaves == 0 {
-				nextIdx := maker.NextIdx
-				bestLvl.headIdx = nextIdx
-				if nextIdx != 0 {
-					b.arena[nextIdx].PrevIdx = 0
-				} else {
-					bestLvl.tailIdx = 0
-				}
-				bestLvl.orderCount--
-				b.orders.Delete(maker.ID)
-
-				b.eventSeq++
-				dst = append(dst, Event{
-					Seq:       b.eventSeq,
-					Type:      EventDone,
-					OrderID:   maker.ID,
-					TraderID:  maker.TraderID,
-					Side:      maker.Side,
-					OrderType: maker.Type,
-					Price:     maker.Price,
-					Qty:       maker.Qty,
-					Leaves:    0,
-				})
-				b.freeOrder(makerIdx)
-			}
 		}
-
-		if bestLvl.orderCount == 0 {
-			opp.removeAt(bestIdx)
-		}
-		if stpTriggered {
-			break
-		}
+		b.restLimit(own, req.ID, req.TraderID, req.Side, price, req.Qty, leaves, orderSeq)
+		return dst
 	}
 
+	// FOK: pre-check atomic fillability before executing any trades.
+	if req.TimeInForce == FOK && !b.canFillFOK(opp, req.Side, req.Type, price, leaves, req.TraderID) {
+		b.eventSeq++
+		return append(dst, Event{
+			Seq:          b.eventSeq,
+			Type:         EventCancelled,
+			OrderID:      req.ID,
+			TraderID:     req.TraderID,
+			Side:         req.Side,
+			OrderType:    req.Type,
+			Price:        price,
+			Qty:          leaves,
+			Leaves:       0,
+			CancelReason: CancelFOK,
+		})
+	}
+
+	var stpTriggered bool
+	leaves, stpTriggered, dst = b.matchSlice(opp, req.ID, req.TraderID, req.Side, req.Type, price, leaves, dst)
 	if stpTriggered {
 		return dst
 	}
@@ -299,7 +335,23 @@ func (b *Book) PlaceOrder(req OrderRequest, dst []Event) []Event {
 		})
 	}
 
-	b.restLimit(own, req, price, leaves, orderSeq)
+	if req.TimeInForce == IOC {
+		b.eventSeq++
+		return append(dst, Event{
+			Seq:          b.eventSeq,
+			Type:         EventCancelled,
+			OrderID:      req.ID,
+			TraderID:     req.TraderID,
+			Side:         req.Side,
+			OrderType:    req.Type,
+			Price:        price,
+			Qty:          leaves,
+			Leaves:       0,
+			CancelReason: CancelIOC,
+		})
+	}
+
+	b.restLimit(own, req.ID, req.TraderID, req.Side, price, req.Qty, leaves, orderSeq)
 	return dst
 }
 
@@ -357,109 +409,46 @@ func (b *Book) PlaceOrderWithCallback(req OrderRequest, fn func(Event)) {
 		own, opp = &b.asks, &b.bids
 	}
 
-	stpTriggered := false
-	for leaves > 0 {
-		bestIdx := opp.bestIdx
-		if bestIdx < 0 {
-			break
-		}
-		bestLvl := &opp.slots[bestIdx]
-		if req.Type == Limit {
-			if req.Side == Buy {
-				if bestLvl.price > price {
-					break
-				}
-			} else {
-				if bestLvl.price < price {
-					break
-				}
-			}
-		}
-
-		for leaves > 0 && bestLvl.headIdx != 0 {
-			makerIdx := bestLvl.headIdx
-			maker := &b.arena[makerIdx]
-
-			if req.TraderID != 0 && maker.TraderID == req.TraderID {
-				stpTriggered = true
-				b.eventSeq++
-				emit(Event{
-					Seq:          b.eventSeq,
-					Type:         EventCancelled,
-					OrderID:      req.ID,
-					TraderID:     req.TraderID,
-					Side:         req.Side,
-					OrderType:    req.Type,
-					Price:        price,
-					Qty:          leaves,
-					Leaves:       0,
-					CancelReason: CancelSTP,
-				})
-				break
-			}
-
-			matchQty := leaves
-			if maker.Leaves < matchQty {
-				matchQty = maker.Leaves
-			}
-
-			leaves -= matchQty
-			maker.Leaves -= matchQty
-			bestLvl.totalQty -= matchQty
-
-			b.tradeSeq++
+	if req.TimeInForce == PostOnly {
+		if wouldCross(opp, req.Side, price) {
 			b.eventSeq++
 			emit(Event{
-				Seq:           b.eventSeq,
-				Type:          EventTrade,
-				TradeID:       b.tradeSeq,
-				OrderID:       req.ID,
-				TraderID:      req.TraderID,
-				MakerOrderID:  maker.ID,
-				MakerTraderID: maker.TraderID,
-				Side:          req.Side,
-				OrderType:     req.Type,
-				Price:         maker.Price,
-				Qty:           matchQty,
-				Leaves:        leaves,
-				MakerLeaves:   maker.Leaves,
+				Seq:          b.eventSeq,
+				Type:         EventCancelled,
+				OrderID:      req.ID,
+				TraderID:     req.TraderID,
+				Side:         req.Side,
+				OrderType:    req.Type,
+				Price:        price,
+				Qty:          leaves,
+				Leaves:       0,
+				CancelReason: CancelPostOnly,
 			})
-
-			if maker.Leaves == 0 {
-				nextIdx := maker.NextIdx
-				bestLvl.headIdx = nextIdx
-				if nextIdx != 0 {
-					b.arena[nextIdx].PrevIdx = 0
-				} else {
-					bestLvl.tailIdx = 0
-				}
-				bestLvl.orderCount--
-				b.orders.Delete(maker.ID)
-
-				b.eventSeq++
-				emit(Event{
-					Seq:       b.eventSeq,
-					Type:      EventDone,
-					OrderID:   maker.ID,
-					TraderID:  maker.TraderID,
-					Side:      maker.Side,
-					OrderType: maker.Type,
-					Price:     maker.Price,
-					Qty:       maker.Qty,
-					Leaves:    0,
-				})
-				b.freeOrder(makerIdx)
-			}
+			return
 		}
-
-		if bestLvl.orderCount == 0 {
-			opp.removeAt(bestIdx)
-		}
-		if stpTriggered {
-			break
-		}
+		b.restLimit(own, req.ID, req.TraderID, req.Side, price, req.Qty, leaves, orderSeq)
+		return
 	}
 
+	if req.TimeInForce == FOK && !b.canFillFOK(opp, req.Side, req.Type, price, leaves, req.TraderID) {
+		b.eventSeq++
+		emit(Event{
+			Seq:          b.eventSeq,
+			Type:         EventCancelled,
+			OrderID:      req.ID,
+			TraderID:     req.TraderID,
+			Side:         req.Side,
+			OrderType:    req.Type,
+			Price:        price,
+			Qty:          leaves,
+			Leaves:       0,
+			CancelReason: CancelFOK,
+		})
+		return
+	}
+
+	var stpTriggered bool
+	leaves, stpTriggered = b.matchCallback(opp, req.ID, req.TraderID, req.Side, req.Type, price, leaves, fn)
 	if stpTriggered {
 		return
 	}
@@ -497,25 +486,572 @@ func (b *Book) PlaceOrderWithCallback(req OrderRequest, fn func(Event)) {
 		return
 	}
 
-	b.restLimit(own, req, price, leaves, orderSeq)
+	if req.TimeInForce == IOC {
+		b.eventSeq++
+		emit(Event{
+			Seq:          b.eventSeq,
+			Type:         EventCancelled,
+			OrderID:      req.ID,
+			TraderID:     req.TraderID,
+			Side:         req.Side,
+			OrderType:    req.Type,
+			Price:        price,
+			Qty:          leaves,
+			Leaves:       0,
+			CancelReason: CancelIOC,
+		})
+		return
+	}
+
+	b.restLimit(own, req.ID, req.TraderID, req.Side, price, req.Qty, leaves, orderSeq)
 }
 
-func (b *Book) restLimit(own *ladder, req OrderRequest, price, leaves int64, orderSeq uint64) {
+func (b *Book) matchSlice(opp *ladder, orderID OrderID, traderID TraderID, side Side, oType OrderType, price, leaves int64, dst []Event) (int64, bool, []Event) {
+	stpTriggered := false
+	for leaves > 0 {
+		bestIdx := opp.bestIdx
+		if bestIdx < 0 {
+			break
+		}
+		bestLvl := &opp.slots[bestIdx]
+		if oType == Limit {
+			if side == Buy {
+				if bestLvl.price > price {
+					break
+				}
+			} else {
+				if bestLvl.price < price {
+					break
+				}
+			}
+		}
+
+		for leaves > 0 && bestLvl.headIdx != 0 {
+			makerIdx := bestLvl.headIdx
+			maker := &b.arena[makerIdx]
+
+			if traderID != 0 && maker.TraderID == traderID {
+				stpTriggered = true
+				b.eventSeq++
+				dst = append(dst, Event{
+					Seq:          b.eventSeq,
+					Type:         EventCancelled,
+					OrderID:      orderID,
+					TraderID:     traderID,
+					Side:         side,
+					OrderType:    oType,
+					Price:        price,
+					Qty:          leaves,
+					Leaves:       0,
+					CancelReason: CancelSTP,
+				})
+				break
+			}
+
+			matchQty := leaves
+			if maker.Leaves < matchQty {
+				matchQty = maker.Leaves
+			}
+
+			leaves -= matchQty
+			maker.Leaves -= matchQty
+			bestLvl.totalQty -= matchQty
+
+			b.tradeSeq++
+			b.eventSeq++
+			dst = append(dst, Event{
+				Seq:           b.eventSeq,
+				Type:          EventTrade,
+				TradeID:       b.tradeSeq,
+				OrderID:       orderID,
+				TraderID:      traderID,
+				MakerOrderID:  maker.ID,
+				MakerTraderID: maker.TraderID,
+				Side:          side,
+				OrderType:     oType,
+				Price:         maker.Price,
+				Qty:           matchQty,
+				Leaves:        leaves,
+				MakerLeaves:   maker.Leaves,
+			})
+
+			if maker.Leaves == 0 {
+				nextIdx := maker.NextIdx
+				bestLvl.headIdx = nextIdx
+				if nextIdx != 0 {
+					b.arena[nextIdx].PrevIdx = 0
+				} else {
+					bestLvl.tailIdx = 0
+				}
+				bestLvl.orderCount--
+				b.orders.Delete(maker.ID)
+
+				b.eventSeq++
+				dst = append(dst, Event{
+					Seq:       b.eventSeq,
+					Type:      EventDone,
+					OrderID:   maker.ID,
+					TraderID:  maker.TraderID,
+					Side:      maker.Side,
+					OrderType: maker.Type,
+					Price:     maker.Price,
+					Qty:       maker.Qty,
+					Leaves:    0,
+				})
+				b.freeOrder(makerIdx)
+			}
+		}
+
+		if bestLvl.orderCount == 0 {
+			opp.removeAt(bestIdx)
+		}
+		if stpTriggered {
+			break
+		}
+	}
+	return leaves, stpTriggered, dst
+}
+
+func (b *Book) matchCallback(opp *ladder, orderID OrderID, traderID TraderID, side Side, oType OrderType, price, leaves int64, fn func(Event)) (int64, bool) {
+	stpTriggered := false
+	for leaves > 0 {
+		bestIdx := opp.bestIdx
+		if bestIdx < 0 {
+			break
+		}
+		bestLvl := &opp.slots[bestIdx]
+		if oType == Limit {
+			if side == Buy {
+				if bestLvl.price > price {
+					break
+				}
+			} else {
+				if bestLvl.price < price {
+					break
+				}
+			}
+		}
+
+		for leaves > 0 && bestLvl.headIdx != 0 {
+			makerIdx := bestLvl.headIdx
+			maker := &b.arena[makerIdx]
+
+			if traderID != 0 && maker.TraderID == traderID {
+				stpTriggered = true
+				b.eventSeq++
+				if fn != nil {
+					fn(Event{
+						Seq:          b.eventSeq,
+						Type:         EventCancelled,
+						OrderID:      orderID,
+						TraderID:     traderID,
+						Side:         side,
+						OrderType:    oType,
+						Price:        price,
+						Qty:          leaves,
+						Leaves:       0,
+						CancelReason: CancelSTP,
+					})
+				}
+				break
+			}
+
+			matchQty := leaves
+			if maker.Leaves < matchQty {
+				matchQty = maker.Leaves
+			}
+
+			leaves -= matchQty
+			maker.Leaves -= matchQty
+			bestLvl.totalQty -= matchQty
+
+			b.tradeSeq++
+			b.eventSeq++
+			if fn != nil {
+				fn(Event{
+					Seq:           b.eventSeq,
+					Type:          EventTrade,
+					TradeID:       b.tradeSeq,
+					OrderID:       orderID,
+					TraderID:      traderID,
+					MakerOrderID:  maker.ID,
+					MakerTraderID: maker.TraderID,
+					Side:          side,
+					OrderType:     oType,
+					Price:         maker.Price,
+					Qty:           matchQty,
+					Leaves:        leaves,
+					MakerLeaves:   maker.Leaves,
+				})
+			}
+
+			if maker.Leaves == 0 {
+				nextIdx := maker.NextIdx
+				bestLvl.headIdx = nextIdx
+				if nextIdx != 0 {
+					b.arena[nextIdx].PrevIdx = 0
+				} else {
+					bestLvl.tailIdx = 0
+				}
+				bestLvl.orderCount--
+				b.orders.Delete(maker.ID)
+
+				b.eventSeq++
+				if fn != nil {
+					fn(Event{
+						Seq:       b.eventSeq,
+						Type:      EventDone,
+						OrderID:   maker.ID,
+						TraderID:  maker.TraderID,
+						Side:      maker.Side,
+						OrderType: maker.Type,
+						Price:     maker.Price,
+						Qty:       maker.Qty,
+						Leaves:    0,
+					})
+				}
+				b.freeOrder(makerIdx)
+			}
+		}
+
+		if bestLvl.orderCount == 0 {
+			opp.removeAt(bestIdx)
+		}
+		if stpTriggered {
+			break
+		}
+	}
+	return leaves, stpTriggered
+}
+
+// ModifyOrder amends a resting limit order's price and/or remaining quantity (Leaves).
+//   - Same price & NewQty < current Leaves: modifies in-place, preserving FIFO priority.
+//   - Price change or NewQty > current Leaves: loses priority, re-matches if crossing, and rests remainder.
+func (b *Book) ModifyOrder(req ModifyRequest, dst []Event) []Event {
+	idx, ok := b.orders.Get(req.ID)
+	if !ok {
+		b.eventSeq++
+		return append(dst, Event{
+			Seq:          b.eventSeq,
+			Type:         EventRejected,
+			OrderID:      req.ID,
+			RejectReason: RejectOrderNotFound,
+		})
+	}
+
+	o := &b.arena[idx]
+	newPrice := req.NewPrice
+	if newPrice == 0 {
+		newPrice = o.Price
+	}
+	newLeaves := req.NewQty
+	if newLeaves == 0 {
+		newLeaves = o.Leaves
+	}
+
+	if r := b.validatePrice(newPrice); r != RejectNone {
+		b.eventSeq++
+		return append(dst, Event{
+			Seq:          b.eventSeq,
+			Type:         EventRejected,
+			OrderID:      req.ID,
+			TraderID:     o.TraderID,
+			Side:         o.Side,
+			OrderType:    Limit,
+			Price:        newPrice,
+			Qty:          newLeaves,
+			RejectReason: r,
+		})
+	}
+	if r := b.validateQty(newLeaves); r != RejectNone {
+		b.eventSeq++
+		return append(dst, Event{
+			Seq:          b.eventSeq,
+			Type:         EventRejected,
+			OrderID:      req.ID,
+			TraderID:     o.TraderID,
+			Side:         o.Side,
+			OrderType:    Limit,
+			Price:        newPrice,
+			Qty:          newLeaves,
+			RejectReason: r,
+		})
+	}
+	if newPrice == o.Price && newLeaves == o.Leaves {
+		b.eventSeq++
+		return append(dst, Event{
+			Seq:          b.eventSeq,
+			Type:         EventRejected,
+			OrderID:      req.ID,
+			TraderID:     o.TraderID,
+			Side:         o.Side,
+			OrderType:    Limit,
+			Price:        newPrice,
+			Qty:          newLeaves,
+			RejectReason: RejectNoChange,
+		})
+	}
+
+	var own, opp *ladder
+	if o.Side == Buy {
+		own, opp = &b.bids, &b.asks
+	} else {
+		own, opp = &b.asks, &b.bids
+	}
+
+	// Fast path: same price and quantity reduced -> keep FIFO time priority in-place!
+	if newPrice == o.Price && newLeaves < o.Leaves {
+		diff := o.Leaves - newLeaves
+		o.Leaves = newLeaves
+		own.slots[o.TickIdx].totalQty -= diff
+
+		b.eventSeq++
+		return append(dst, Event{
+			Seq:       b.eventSeq,
+			Type:      EventModified,
+			OrderID:   o.ID,
+			TraderID:  o.TraderID,
+			Side:      o.Side,
+			OrderType: Limit,
+			Price:     o.Price,
+			Qty:       newLeaves,
+			Leaves:    newLeaves,
+		})
+	}
+
+	// Price changed or quantity increased -> lose time priority, unlink, re-match if crossing.
+	traderID := o.TraderID
+	side := o.Side
+	b.unlinkAndFree(own, idx)
+	b.orders.Delete(req.ID)
+
+	b.orderSeq++
+	orderSeq := b.orderSeq
+
+	b.eventSeq++
+	dst = append(dst, Event{
+		Seq:       b.eventSeq,
+		Type:      EventModified,
+		OrderID:   req.ID,
+		TraderID:  traderID,
+		Side:      side,
+		OrderType: Limit,
+		Price:     newPrice,
+		Qty:       newLeaves,
+		Leaves:    newLeaves,
+	})
+
+	leaves, stpTriggered, dst := b.matchSlice(opp, req.ID, traderID, side, Limit, newPrice, newLeaves, dst)
+	if stpTriggered {
+		return dst
+	}
+	if leaves == 0 {
+		b.eventSeq++
+		return append(dst, Event{
+			Seq:       b.eventSeq,
+			Type:      EventDone,
+			OrderID:   req.ID,
+			TraderID:  traderID,
+			Side:      side,
+			OrderType: Limit,
+			Price:     newPrice,
+			Qty:       newLeaves,
+			Leaves:    0,
+		})
+	}
+
+	b.restLimit(own, req.ID, traderID, side, newPrice, newLeaves, leaves, orderSeq)
+	return dst
+}
+
+// ModifyOrderWithCallback amends a resting limit order and streams events to fn.
+func (b *Book) ModifyOrderWithCallback(req ModifyRequest, fn func(Event)) {
+	emit := func(ev Event) {
+		if fn != nil {
+			fn(ev)
+		}
+	}
+
+	idx, ok := b.orders.Get(req.ID)
+	if !ok {
+		b.eventSeq++
+		emit(Event{
+			Seq:          b.eventSeq,
+			Type:         EventRejected,
+			OrderID:      req.ID,
+			RejectReason: RejectOrderNotFound,
+		})
+		return
+	}
+
+	o := &b.arena[idx]
+	newPrice := req.NewPrice
+	if newPrice == 0 {
+		newPrice = o.Price
+	}
+	newLeaves := req.NewQty
+	if newLeaves == 0 {
+		newLeaves = o.Leaves
+	}
+
+	if r := b.validatePrice(newPrice); r != RejectNone {
+		b.eventSeq++
+		emit(Event{
+			Seq:          b.eventSeq,
+			Type:         EventRejected,
+			OrderID:      req.ID,
+			TraderID:     o.TraderID,
+			Side:         o.Side,
+			OrderType:    Limit,
+			Price:        newPrice,
+			Qty:          newLeaves,
+			RejectReason: r,
+		})
+		return
+	}
+	if r := b.validateQty(newLeaves); r != RejectNone {
+		b.eventSeq++
+		emit(Event{
+			Seq:          b.eventSeq,
+			Type:         EventRejected,
+			OrderID:      req.ID,
+			TraderID:     o.TraderID,
+			Side:         o.Side,
+			OrderType:    Limit,
+			Price:        newPrice,
+			Qty:          newLeaves,
+			RejectReason: r,
+		})
+		return
+	}
+	if newPrice == o.Price && newLeaves == o.Leaves {
+		b.eventSeq++
+		emit(Event{
+			Seq:          b.eventSeq,
+			Type:         EventRejected,
+			OrderID:      req.ID,
+			TraderID:     o.TraderID,
+			Side:         o.Side,
+			OrderType:    Limit,
+			Price:        newPrice,
+			Qty:          newLeaves,
+			RejectReason: RejectNoChange,
+		})
+		return
+	}
+
+	var own, opp *ladder
+	if o.Side == Buy {
+		own, opp = &b.bids, &b.asks
+	} else {
+		own, opp = &b.asks, &b.bids
+	}
+
+	if newPrice == o.Price && newLeaves < o.Leaves {
+		diff := o.Leaves - newLeaves
+		o.Leaves = newLeaves
+		own.slots[o.TickIdx].totalQty -= diff
+
+		b.eventSeq++
+		emit(Event{
+			Seq:       b.eventSeq,
+			Type:      EventModified,
+			OrderID:   o.ID,
+			TraderID:  o.TraderID,
+			Side:      o.Side,
+			OrderType: Limit,
+			Price:     o.Price,
+			Qty:       newLeaves,
+			Leaves:    newLeaves,
+		})
+		return
+	}
+
+	traderID := o.TraderID
+	side := o.Side
+	b.unlinkAndFree(own, idx)
+	b.orders.Delete(req.ID)
+
+	b.orderSeq++
+	orderSeq := b.orderSeq
+
+	b.eventSeq++
+	emit(Event{
+		Seq:       b.eventSeq,
+		Type:      EventModified,
+		OrderID:   req.ID,
+		TraderID:  traderID,
+		Side:      side,
+		OrderType: Limit,
+		Price:     newPrice,
+		Qty:       newLeaves,
+		Leaves:    newLeaves,
+	})
+
+	leaves, stpTriggered := b.matchCallback(opp, req.ID, traderID, side, Limit, newPrice, newLeaves, fn)
+	if stpTriggered {
+		return
+	}
+	if leaves == 0 {
+		b.eventSeq++
+		emit(Event{
+			Seq:       b.eventSeq,
+			Type:      EventDone,
+			OrderID:   req.ID,
+			TraderID:  traderID,
+			Side:      side,
+			OrderType: Limit,
+			Price:     newPrice,
+			Qty:       newLeaves,
+			Leaves:    0,
+		})
+		return
+	}
+
+	b.restLimit(own, req.ID, traderID, side, newPrice, newLeaves, leaves, orderSeq)
+}
+
+func (b *Book) unlinkAndFree(side *ladder, idx uint32) {
+	o := &b.arena[idx]
+	lvl := &side.slots[o.TickIdx]
+
+	prevIdx := o.PrevIdx
+	nextIdx := o.NextIdx
+	if prevIdx != 0 {
+		b.arena[prevIdx].NextIdx = nextIdx
+	} else {
+		lvl.headIdx = nextIdx
+	}
+	if nextIdx != 0 {
+		b.arena[nextIdx].PrevIdx = prevIdx
+	} else {
+		lvl.tailIdx = prevIdx
+	}
+
+	lvl.totalQty -= o.Leaves
+	lvl.orderCount--
+	if lvl.orderCount == 0 {
+		side.removeAt(int(o.TickIdx))
+	}
+	b.freeOrder(idx)
+}
+
+func (b *Book) restLimit(own *ladder, id OrderID, traderID TraderID, side Side, price, qty, leaves int64, orderSeq uint64) {
 	idx := b.allocOrder()
 	lvl, tickIdx := own.getOrCreate(price)
 	tailIdx := lvl.tailIdx
 
 	b.arena[idx] = arenaOrder{
-		ID:       req.ID,
-		TraderID: req.TraderID,
+		ID:       id,
+		TraderID: traderID,
 		Price:    price,
-		Qty:      req.Qty,
+		Qty:      qty,
 		Leaves:   leaves,
 		Seq:      orderSeq,
 		PrevIdx:  tailIdx,
 		NextIdx:  0,
 		TickIdx:  tickIdx,
-		Side:     req.Side,
+		Side:     side,
 		Type:     Limit,
 	}
 
@@ -528,7 +1064,7 @@ func (b *Book) restLimit(own *ladder, req OrderRequest, price, leaves int64, ord
 	lvl.totalQty += leaves
 	lvl.orderCount++
 
-	b.orders.Set(req.ID, idx)
+	b.orders.Set(id, idx)
 }
 
 func (b *Book) cancelInternal(id OrderID) Event {
@@ -550,30 +1086,7 @@ func (b *Book) cancelInternal(id OrderID) Event {
 	} else {
 		side = &b.asks
 	}
-	lvl := &side.slots[o.TickIdx]
-
-	prevIdx := o.PrevIdx
-	nextIdx := o.NextIdx
-	if prevIdx != 0 {
-		b.arena[prevIdx].NextIdx = nextIdx
-	} else {
-		lvl.headIdx = nextIdx
-	}
-	if nextIdx != 0 {
-		b.arena[nextIdx].PrevIdx = prevIdx
-	} else {
-		lvl.tailIdx = prevIdx
-	}
-
-	lvl.totalQty -= o.Leaves
-	lvl.orderCount--
-	if lvl.orderCount == 0 {
-		side.removeAt(int(o.TickIdx))
-	}
-
-	b.eventSeq++
 	ev := Event{
-		Seq:          b.eventSeq,
 		Type:         EventCancelled,
 		OrderID:      o.ID,
 		TraderID:     o.TraderID,
@@ -585,7 +1098,10 @@ func (b *Book) cancelInternal(id OrderID) Event {
 		CancelReason: CancelUser,
 	}
 
-	b.freeOrder(idx)
+	b.unlinkAndFree(side, idx)
+
+	b.eventSeq++
+	ev.Seq = b.eventSeq
 	return ev
 }
 

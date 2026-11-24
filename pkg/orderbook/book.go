@@ -1197,16 +1197,17 @@ func (b *Book) restLimit(own *ladder, tickIdx uint32, id OrderID, traderID Trade
 	b.orders.Set(id, idx)
 }
 
-func (b *Book) cancelInternal(id OrderID) Event {
+func (b *Book) cancelInto(id OrderID, out *Event) {
 	idx, ok := b.orders.Delete(id)
 	if !ok {
 		b.eventSeq++
-		return Event{
+		*out = Event{
 			Seq:          b.eventSeq,
 			Type:         EventRejected,
 			OrderID:      id,
 			RejectReason: RejectOrderNotFound,
 		}
+		return
 	}
 
 	o := &b.arena[idx]
@@ -1216,7 +1217,9 @@ func (b *Book) cancelInternal(id OrderID) Event {
 	} else {
 		side = &b.asks
 	}
-	ev := Event{
+	b.eventSeq++
+	*out = Event{
+		Seq:          b.eventSeq,
 		Type:         EventCancelled,
 		OrderID:      o.ID,
 		TraderID:     o.TraderID,
@@ -1229,24 +1232,28 @@ func (b *Book) cancelInternal(id OrderID) Event {
 	}
 
 	b.unlinkAndFree(side, idx)
-
-	b.eventSeq++
-	ev.Seq = b.eventSeq
-	return ev
 }
 
 // CancelOrder cancels an active resting order by ID, appending either
 // EventCancelled(CancelUser) or EventRejected(RejectOrderNotFound) to dst.
 func (b *Book) CancelOrder(id OrderID, dst []Event) []Event {
 	b.assertNotInCallback()
-	return append(dst, b.cancelInternal(id))
+	n := len(dst)
+	if n < cap(dst) {
+		dst = dst[:n+1]
+	} else {
+		dst = append(dst, Event{})
+	}
+	b.cancelInto(id, &dst[n])
+	return dst
 }
 
 // CancelOrderWithCallback cancels an active resting order by ID and streams the
 // resulting event directly to fn.
 func (b *Book) CancelOrderWithCallback(id OrderID, fn func(Event)) {
 	b.assertNotInCallback()
-	ev := b.cancelInternal(id)
+	var ev Event
+	b.cancelInto(id, &ev)
 	if fn != nil {
 		b.inCallback = true
 		defer func() { b.inCallback = false }()

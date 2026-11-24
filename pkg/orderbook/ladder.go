@@ -5,18 +5,15 @@ import (
 	"math/bits"
 )
 
-// priceLevel is 32 bytes (2 per cache line) and contains zero Go pointers (GC noscan).
 type priceLevel struct {
-	price      int64  // 8 B
-	totalQty   int64  // 8 B
-	orderCount int32  // 4 B
-	headIdx    uint32 // 4 B (0 = empty)
-	tailIdx    uint32 // 4 B (0 = empty)
-	_          uint32 // pad to 32 B
+	price      int64
+	totalQty   int64
+	orderCount int32
+	headIdx    arenaIdx
+	tailIdx    arenaIdx
+	_          uint32
 }
 
-// ladder is a fixed tick-indexed price-level store with a []uint64 active bitset
-// for O(1) price lookup and hardware LZCNT/TZCNT gap skipping.
 type ladder struct {
 	side     Side
 	minPrice int64
@@ -57,8 +54,8 @@ func (l *ladder) activate(idx int, price int64) {
 	lvl.price = price
 	lvl.totalQty = 0
 	lvl.orderCount = 0
-	lvl.headIdx = 0
-	lvl.tailIdx = 0
+	lvl.headIdx = nilArenaIdx
+	lvl.tailIdx = nilArenaIdx
 	l.count++
 	if l.bestIdx < 0 {
 		l.bestIdx = idx
@@ -80,8 +77,8 @@ func (l *ladder) removeAt(idx int) {
 	lvl := &l.slots[idx]
 	lvl.totalQty = 0
 	lvl.orderCount = 0
-	lvl.headIdx = 0
-	lvl.tailIdx = 0
+	lvl.headIdx = nilArenaIdx
+	lvl.tailIdx = nilArenaIdx
 	l.count--
 
 	if l.count == 0 {
@@ -187,8 +184,8 @@ func (l *ladder) reset() {
 			b := bits.TrailingZeros64(word)
 			word &^= uint64(1) << uint(b)
 			lvl := &l.slots[(w<<6)|b]
-			lvl.headIdx = 0
-			lvl.tailIdx = 0
+			lvl.headIdx = nilArenaIdx
+			lvl.tailIdx = nilArenaIdx
 			lvl.totalQty = 0
 			lvl.orderCount = 0
 		}

@@ -204,14 +204,12 @@ type Order struct {
 	Leaves   int64
 	Seq      uint64
 
-	// Back-pointer to owning PriceLevel for O(1) cancel lookup.
 	Level *PriceLevel
 
-	// Intrusive doubly-linked list links (used by queue.LinkedList and pool.FreeList).
-	Prev *Order
-	Next *Order
+	Prev     *Order
+	Next     *Order
+	PoolNext *Order
 
-	// Logical slot position inside queue.RingBuffer for O(1) tombstone cancel.
 	QueuePos uint64
 }
 

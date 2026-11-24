@@ -129,7 +129,6 @@ func (l *Ladder) Remove(price int64) {
 	}
 }
 
-// findPrevActive returns the highest active tick index <= maxIdx, or -1 if none.
 func (l *Ladder) findPrevActive(maxIdx int) int {
 	if maxIdx < 0 {
 		return -1
@@ -148,7 +147,6 @@ func (l *Ladder) findPrevActive(maxIdx int) int {
 	return (w << 6) | (63 - bits.LeadingZeros64(word))
 }
 
-// findNextActive returns the lowest active tick index >= minIdx, or -1 if none.
 func (l *Ladder) findNextActive(minIdx int) int {
 	if minIdx >= len(l.slots) {
 		return -1

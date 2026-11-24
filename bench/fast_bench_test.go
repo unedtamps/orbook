@@ -585,7 +585,6 @@ func BenchmarkArenaBook(b *testing.B) {
 	})
 }
 
-// TestFastAndArenaLatencyAndGC compares HDR latency and GC mark cost with 250k resting orders.
 func TestFastAndArenaLatencyAndGC(t *testing.T) {
 	w := bench.GenerateMixedWorkload(bench.DefaultConfig(), 20261122, 2000, 200_000)
 
@@ -642,7 +641,6 @@ func TestFastAndArenaLatencyAndGC(t *testing.T) {
 	}
 	measure("ArenaBook", ab.PlaceOrder, ab.CancelOrder, ab.Reset)
 
-	// Measure runtime.GC() mark cost with 250,000 resting orders in memory.
 	const restingN = 250_000
 	cfg := bench.DefaultConfig()
 	mid := (cfg.MinPrice + cfg.MaxPrice) / 2

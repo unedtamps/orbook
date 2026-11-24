@@ -79,14 +79,13 @@ func TestEngineSyncAndAsync(t *testing.T) {
 		t.Fatalf("unexpected Depth: bids=%+v asks=%+v", bids, asks)
 	}
 
-	// Cancel remaining ask asynchronously and drain via Stop.
 	eng.CancelOrderAsync(1)
 	eng.Stop()
 
 	if tradeCount.Load() != 1 {
 		t.Fatalf("got %d trades, want 1", tradeCount.Load())
 	}
-	if eventCount.Load() != 5 { // Accepted(1) + Accepted(2)+Trade+Done(2) + Cancelled(1)
+	if eventCount.Load() != 5 {
 		t.Fatalf("got %d total events, want 5", eventCount.Load())
 	}
 	if err := b.CheckInvariants(); err != nil {

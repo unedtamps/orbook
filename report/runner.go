@@ -121,14 +121,12 @@ func Run(opts RunOptions) (*RunResult, error) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	// Compile ./bench test binary ONCE to avoid repeated go toolchain startup overhead.
 	logf("Compiling ./bench test binary...")
 	benchBin := filepath.Join(tmpDir, "bench.test")
 	if err := compileBenchBinary(benchBin); err != nil {
 		return nil, err
 	}
 
-	// 1. Run clean timing benchmarks (no profiling overhead skewing ns/op).
 	logf("Running benchmarks (filter=%q, benchtime=%s)...", opts.BenchFilter, opts.BenchTime)
 	newBenches, cpuModel, err := runBenchBinary(benchBin, opts.BenchFilter, opts.BenchTime, "", "")
 	if err != nil {
@@ -138,7 +136,6 @@ func Run(opts RunOptions) (*RunResult, error) {
 		return nil, fmt.Errorf("no benchmarks matched filter %q", opts.BenchFilter)
 	}
 
-	// 2. Determine which benchmarks to profile.
 	targets := selectProfileTargets(newBenches, opts)
 	type profJob struct {
 		bench   BenchResult
@@ -169,7 +166,6 @@ func Run(opts RunOptions) (*RunResult, error) {
 		}
 	}
 
-	// Extract pprof top tables concurrently (read-only post-processing; does not affect measurements).
 	newProfiles := make([]ProfileSummary, len(jobs))
 	if len(jobs) > 0 {
 		logf("Extracting pprof hotspots for %d profile(s)...", len(jobs))
@@ -196,7 +192,6 @@ func Run(opts RunOptions) (*RunResult, error) {
 		wg.Wait()
 	}
 
-	// 3. Optional HDR latency suite (all variants in full mode; only matched variants in single mode).
 	var newLatency []LatencySummary
 	if opts.IncludeHDR {
 		hdrVariants := selectHDRVariants(newBenches, opts.Mode)
@@ -222,7 +217,6 @@ func Run(opts RunOptions) (*RunResult, error) {
 		}
 	}
 
-	// 4. Compute diff against previous latest.json.
 	diff := ComputeDiff(prev, newBenches, opts.ThresholdPct)
 
 	nextVersion := 1
@@ -232,7 +226,6 @@ func Run(opts RunOptions) (*RunResult, error) {
 	now := time.Now()
 	runID := fmt.Sprintf("v%03d_%s", nextVersion, now.Format("20060102_150405"))
 
-	// Merge into centralized dataset if single mode and prev exists.
 	mergedBenches := newBenches
 	mergedLatency := newLatency
 	mergedProfiles := newProfiles
@@ -264,7 +257,6 @@ func Run(opts RunOptions) (*RunResult, error) {
 		Diff:       diff,
 	}
 
-	// 5. Only create a new version if there is a diff (or first run, or Force).
 	if prev != nil && !diff.HasDiff && !opts.Force {
 		rep.Version = prev.Version
 		rep.RunID = prev.RunID
@@ -277,7 +269,6 @@ func Run(opts RunOptions) (*RunResult, error) {
 		return nil, err
 	}
 
-	// Copy newly generated .prof files into history/<runID>/profiles/ and record relative paths.
 	jobByName := make(map[string]profJob, len(jobs))
 	for _, j := range jobs {
 		jobByName[j.bench.FullName] = j
@@ -312,12 +303,12 @@ func Run(opts RunOptions) (*RunResult, error) {
 	}
 
 	files := map[string][]byte{
-		filepath.Join(versionDir, "results.json"):  jsonBytes,
-		filepath.Join(versionDir, "report.md"):     mdBytes,
-		filepath.Join(versionDir, "report.html"):   htmlBytes,
-		filepath.Join(opts.OutDir, "latest.json"):  jsonBytes,
-		filepath.Join(opts.OutDir, "latest.md"):    mdBytes,
-		filepath.Join(opts.OutDir, "latest.html"):  htmlBytes,
+		filepath.Join(versionDir, "results.json"): jsonBytes,
+		filepath.Join(versionDir, "report.md"):    mdBytes,
+		filepath.Join(versionDir, "report.html"):  htmlBytes,
+		filepath.Join(opts.OutDir, "latest.json"): jsonBytes,
+		filepath.Join(opts.OutDir, "latest.md"):   mdBytes,
+		filepath.Join(opts.OutDir, "latest.html"): htmlBytes,
 	}
 	for path, data := range files {
 		if err := os.WriteFile(path, data, 0o644); err != nil {
@@ -334,7 +325,6 @@ func Run(opts RunOptions) (*RunResult, error) {
 
 func selectProfileTargets(benches []BenchResult, opts RunOptions) []BenchResult {
 	if opts.Mode == "single" {
-		// In single mode, profile EVERY matched benchmark variant.
 		return benches
 	}
 	switch opts.ProfileMode {
@@ -343,7 +333,6 @@ func selectProfileTargets(benches []BenchResult, opts RunOptions) []BenchResult 
 	case "all":
 		return benches
 	case "methods":
-		// Pick the fastest variant for each distinct method.
 		bestByMethod := make(map[string]BenchResult)
 		order := make([]string, 0, 16)
 		for _, b := range benches {

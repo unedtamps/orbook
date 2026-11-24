@@ -35,7 +35,6 @@ func TestFreeListReuseAndZeroing(t *testing.T) {
 		t.Fatalf("after putting all back: free=%d, want 8", p.FreeCount())
 	}
 
-	// Next 8 gets must not grow slabs and must return freshly zeroed structs.
 	for i := 0; i < 8; i++ {
 		o := p.Get()
 		if o.ID != 0 || o.Price != 0 || o.Leaves != 0 {

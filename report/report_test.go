@@ -58,7 +58,6 @@ func TestComputeDiffVersioning(t *testing.T) {
 		},
 	}
 
-	// Within 2% threshold -> no diff.
 	same := []report.BenchResult{
 		{FullName: "BenchmarkAddLimit/ladder_linkedlist_pool", NsPerOp: 30.4, BytesPerOp: 0, AllocsOp: 0},
 	}
@@ -67,7 +66,6 @@ func TestComputeDiffVersioning(t *testing.T) {
 		t.Fatalf("expected HasDiff=false for +1.3%% change, got %+v", d1)
 	}
 
-	// Beyond threshold + alloc change -> has diff.
 	changed := []report.BenchResult{
 		{FullName: "BenchmarkAddLimit/ladder_linkedlist_pool", NsPerOp: 25.0, BytesPerOp: 0, AllocsOp: 0},
 		{FullName: "BenchmarkCancel/ladder_linkedlist_pool", NsPerOp: 40.1, BytesPerOp: 96, AllocsOp: 1},

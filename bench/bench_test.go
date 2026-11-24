@@ -32,7 +32,6 @@ func BenchmarkAddLimit(b *testing.B) {
 	mid := (cfg.MinPrice + cfg.MaxPrice) / 2
 	const batchSize = 4096
 
-	// Pre-generate deterministic non-crossing limit requests across 400 ticks around mid.
 	rng := rand.New(rand.NewSource(101))
 	reqs := make([]book.OrderRequest, batchSize)
 	for i := 0; i < batchSize; i++ {
@@ -62,7 +61,6 @@ func BenchmarkAddLimit(b *testing.B) {
 			}
 			evBuf := make([]book.Event, 0, 16)
 
-			// Seed 100 resting bid + 100 resting ask anchor levels (even offsets) so the book is deep.
 			for k := 1; k <= 100; k++ {
 				evBuf = bk.PlaceOrder(book.OrderRequest{
 					ID: book.OrderID(k), TraderID: 1, Side: book.Buy, Type: book.Limit, Price: mid - int64(k*2), Qty: 100,
@@ -72,7 +70,6 @@ func BenchmarkAddLimit(b *testing.B) {
 				}, evBuf[:0])
 			}
 
-			// Warm up map buckets and ring buffers for one full batch before timing.
 			for i := 0; i < batchSize; i++ {
 				evBuf = bk.PlaceOrder(reqs[i], evBuf[:0])
 			}
@@ -124,7 +121,6 @@ func BenchmarkCancel(b *testing.B) {
 			Qty:      100,
 		}
 	}
-	// Cancel in shuffled order to exercise middle-of-queue and arbitrary-level removal.
 	cancelOrder := make([]book.OrderID, batchSize)
 	for i, p := range rng.Perm(batchSize) {
 		cancelOrder[i] = reqs[p].ID
@@ -231,7 +227,7 @@ func BenchmarkMatchSweep(b *testing.B) {
 	mid := (cfg.MinPrice + cfg.MaxPrice) / 2
 	const sweepLevels = 10
 	const numSweeps = 500
-	const totalAsks = sweepLevels * numSweeps // 5000 contiguous ticks
+	const totalAsks = sweepLevels * numSweeps
 
 	for _, v := range bench.AllVariants() {
 		v := v
@@ -422,7 +418,6 @@ func BenchmarkMixedWorkload(b *testing.B) {
 			ops := w.Ops
 			nOps := len(ops)
 
-			// Warm up map buckets, level queues, and pool with one full pass before timing.
 			evBuf = w.ApplyWarmup(bk, evBuf)
 			for i := 0; i < nOps; i++ {
 				evBuf = bench.ReplayOp(bk, &ops[i], evBuf)
@@ -522,7 +517,6 @@ func BenchmarkEngineBatch(b *testing.B) {
 	}
 	bk.Reset()
 
-	// Pre-convert workload into slices of 64 Commands so benchmark measures pure batched transport + matching.
 	const batchSize = 64
 	nOps := len(w.Ops)
 	allCmds := make([]engine.Command, nOps)

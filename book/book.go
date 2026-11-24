@@ -114,7 +114,6 @@ func (b *Book) PlaceOrder(req OrderRequest, events []Event) []Event {
 		for leaves > 0 && !bestLvl.IsEmpty() {
 			maker := bestLvl.Front()
 
-			// Self-Trade Prevention: Cancel Newest cancels the taker remainder.
 			if req.TraderID != 0 && maker.TraderID == req.TraderID {
 				stpTriggered = true
 				b.eventSeq++
@@ -223,7 +222,6 @@ func (b *Book) PlaceOrder(req OrderRequest, events []Event) []Event {
 		})
 	}
 
-	// Rest unfilled Limit remainder on the book.
 	o := b.pool.Get()
 	o.ID = req.ID
 	o.TraderID = req.TraderID
@@ -392,8 +390,6 @@ func (b *Book) HasOrder(id OrderID) bool {
 // Reset clears all resting orders and resets sequence counters while retaining
 // pre-allocated map buckets, price-level stores, and pooled Order structs.
 func (b *Book) Reset() {
-	// Reset level queues BEFORE returning orders to the pool, because intrusive
-	// queues (LinkedList) and intrusive pools (FreeList) share Order.Next.
 	b.bids.Reset()
 	b.asks.Reset()
 	b.orders.ForEach(func(o *Order) {

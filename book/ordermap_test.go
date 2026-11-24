@@ -19,8 +19,7 @@ func TestArenaStructSizes(t *testing.T) {
 }
 
 func TestOrderMapDifferentialRandom(t *testing.T) {
-	m := newOrderMap(16) // small initial cap? clamped to orderMapInitCap; test small cap directly too.
-	m = orderMap{
+	m := orderMap{
 		slots: make([]orderSlot, 16),
 		mask:  15,
 		shift: 60,
@@ -61,7 +60,6 @@ func TestOrderMapDifferentialRandom(t *testing.T) {
 		}
 	}
 
-	// Verify all remaining keys match 1-to-1.
 	for k, want := range ref {
 		got, ok := m.Get(k)
 		if !ok || got != want {

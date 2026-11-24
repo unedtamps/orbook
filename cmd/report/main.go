@@ -38,7 +38,6 @@ func runReport(args []string) {
 	outDir := fs.String("out", "reports", "output directory for centralized reports")
 	_ = fs.Parse(args)
 
-	// Normalize simple "Method/Variant" filter into exact Go sub-benchmark regex if no regex metachars used.
 	filter := *benchFilter
 	if *mode == "single" && filter != "." && !strings.ContainsAny(filter, "^$*+?()[]|\\") {
 		filter = report.ExactBenchRegex(filter)

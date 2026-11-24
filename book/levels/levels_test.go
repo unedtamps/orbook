@@ -29,10 +29,9 @@ func TestPriceLevelsWordBoundariesAndTickSize(t *testing.T) {
 		TickSize: 25,
 		LotSize:  100,
 		MinPrice: 1000,
-		MaxPrice: 1000 + 25*300, // spans multiple 64-bit words
+		MaxPrice: 1000 + 25*300,
 	}
 
-	// Prices specifically targeting bit positions 0, 1, 63, 64, 65, 127, 128, 300.
 	tickOffsets := []int64{0, 1, 63, 64, 65, 127, 128, 255, 300}
 
 	for _, side := range []book.Side{book.Buy, book.Sell} {
@@ -54,7 +53,6 @@ func TestPriceLevelsWordBoundariesAndTickSize(t *testing.T) {
 					t.Fatalf("Len() = %d, want %d", st.Len(), len(tickOffsets))
 				}
 
-				// Verify TopN ordering and Best().
 				var top []book.DepthLevel
 				top = st.TopN(len(tickOffsets), top)
 				if len(top) != len(tickOffsets) {
@@ -74,7 +72,6 @@ func TestPriceLevelsWordBoundariesAndTickSize(t *testing.T) {
 					}
 				}
 
-				// Remove best repeatedly and confirm next best transitions across 64-bit word boundaries.
 				for i := 0; i < len(tickOffsets); i++ {
 					var wantOff int64
 					if side == book.Buy {
@@ -131,7 +128,6 @@ func TestPriceLevelsDifferentialRandom(t *testing.T) {
 					}
 				}
 
-				// Compare Best(), Len(), and TopN(10) across all three stores.
 				ref := stores["SortedSlice"]
 				refBest := ref.Best()
 				refTop := ref.TopN(10, nil)

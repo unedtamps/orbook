@@ -5,38 +5,38 @@ import (
 	"math/bits"
 )
 
-// arenaOrder is exactly 64 bytes (one x86-64 L1 cache line) and contains ZERO
-// Go pointers, so the backing []arenaOrder slice is marked noscan by Go's GC.
+type arenaIdx uint32
+
+const nilArenaIdx arenaIdx = 0
+
 type arenaOrder struct {
-	ID       OrderID   // 8
-	TraderID TraderID  // 8
-	Price    int64     // 8
-	Qty      int64     // 8
-	Leaves   int64     // 8
-	Seq      uint64    // 8
-	PrevIdx  uint32    // 4 (0 = nil)
-	NextIdx  uint32    // 4 (0 = nil; also intrusive free-list next)
-	TickIdx  uint32    // 4 (direct ladder slot index)
-	Side     Side      // 1
-	Type     OrderType // 1
-	_        [2]byte   // pad to 64 B
+	ID       OrderID
+	TraderID TraderID
+	Price    int64
+	Qty      int64
+	Leaves   int64
+	Seq      uint64
+	PrevIdx  arenaIdx
+	NextIdx  arenaIdx
+	TickIdx  uint32
+	Side     Side
+	Type     OrderType
+	_        [2]byte
 }
 
-// arenaLevel is 32 bytes (two levels per cache line) and contains ZERO pointers.
 type arenaLevel struct {
-	price      int64  // 8
-	totalQty   int64  // 8
-	orderCount int32  // 4
-	headIdx    uint32 // 4 (0 = empty)
-	tailIdx    uint32 // 4 (0 = empty)
-	_          uint32 // pad to 32 B
+	price      int64
+	totalQty   int64
+	orderCount int32
+	headIdx    arenaIdx
+	tailIdx    arenaIdx
+	_          uint32
 }
 
-// arenaMapSlot is 16 bytes and contains ZERO pointers (noscan).
 type arenaMapSlot struct {
-	key OrderID // 8 (0 = empty)
-	idx uint32  // 4 (arena index >= 1)
-	_   uint32  // pad to 16 B
+	key OrderID
+	idx arenaIdx
+	_   uint32
 }
 
 type arenaOrderMap struct {
@@ -78,7 +78,7 @@ func (m *arenaOrderMap) Has(id OrderID) bool {
 	}
 }
 
-func (m *arenaOrderMap) Set(id OrderID, idx uint32) {
+func (m *arenaOrderMap) Set(id OrderID, idx arenaIdx) {
 	if m.count*2 >= len(m.slots) {
 		m.grow()
 	}
@@ -99,7 +99,7 @@ func (m *arenaOrderMap) Set(id OrderID, idx uint32) {
 	}
 }
 
-func (m *arenaOrderMap) Delete(id OrderID) (uint32, bool) {
+func (m *arenaOrderMap) Delete(id OrderID) (arenaIdx, bool) {
 	mask := m.mask
 	i := m.hash(id)
 	for {
@@ -124,7 +124,7 @@ func (m *arenaOrderMap) Delete(id OrderID) (uint32, bool) {
 			}
 		}
 		if k == 0 {
-			return 0, false
+			return nilArenaIdx, false
 		}
 		i = (i + 1) & mask
 	}
@@ -200,8 +200,8 @@ func (l *arenaLadder) getOrCreate(price int64) (*arenaLevel, uint32) {
 		lvl.price = price
 		lvl.totalQty = 0
 		lvl.orderCount = 0
-		lvl.headIdx = 0
-		lvl.tailIdx = 0
+		lvl.headIdx = nilArenaIdx
+		lvl.tailIdx = nilArenaIdx
 		l.count++
 		if l.bestIdx < 0 {
 			l.bestIdx = idx
@@ -225,8 +225,8 @@ func (l *arenaLadder) removeAt(idx int) {
 	lvl := &l.slots[idx]
 	lvl.totalQty = 0
 	lvl.orderCount = 0
-	lvl.headIdx = 0
-	lvl.tailIdx = 0
+	lvl.headIdx = nilArenaIdx
+	lvl.tailIdx = nilArenaIdx
 	l.count--
 
 	if l.count == 0 {
@@ -332,8 +332,8 @@ func (l *arenaLadder) reset() {
 			b := bits.TrailingZeros64(word)
 			word &^= uint64(1) << uint(b)
 			lvl := &l.slots[(w<<6)|b]
-			lvl.headIdx = 0
-			lvl.tailIdx = 0
+			lvl.headIdx = nilArenaIdx
+			lvl.tailIdx = nilArenaIdx
 			lvl.totalQty = 0
 			lvl.orderCount = 0
 		}
@@ -352,9 +352,9 @@ type ArenaBook struct {
 	bids     arenaLadder
 	asks     arenaLadder
 	orders   arenaOrderMap
-	arena    []arenaOrder // index 0 is unused nil sentinel
-	freeHead uint32
-	highMark uint32 // bump allocator cursor before free-list reuse
+	arena    []arenaOrder
+	freeHead arenaIdx
+	highMark arenaIdx
 	orderSeq uint64
 	eventSeq uint64
 	tradeSeq uint64
@@ -373,13 +373,13 @@ func NewArenaBook(cfg Config, initCap int) (*ArenaBook, error) {
 		bids:     newArenaLadder(Buy, cfg),
 		asks:     newArenaLadder(Sell, cfg),
 		orders:   newArenaOrderMap(initCap * 2),
-		arena:    make([]arenaOrder, initCap+1), // slot 0 = nil sentinel
+		arena:    make([]arenaOrder, initCap+1),
 		highMark: 1,
 	}, nil
 }
 
-func (b *ArenaBook) allocOrder() uint32 {
-	if b.freeHead != 0 {
+func (b *ArenaBook) allocOrder() arenaIdx {
+	if b.freeHead != nilArenaIdx {
 		idx := b.freeHead
 		b.freeHead = b.arena[idx].NextIdx
 		return idx
@@ -394,7 +394,7 @@ func (b *ArenaBook) allocOrder() uint32 {
 	return idx
 }
 
-func (b *ArenaBook) freeOrder(idx uint32) {
+func (b *ArenaBook) freeOrder(idx arenaIdx) {
 	b.arena[idx].NextIdx = b.freeHead
 	b.freeHead = idx
 }
@@ -497,7 +497,7 @@ func (b *ArenaBook) PlaceOrder(req OrderRequest, events []Event) []Event {
 			}
 		}
 
-		for leaves > 0 && bestLvl.headIdx != 0 {
+		for leaves > 0 && bestLvl.headIdx != nilArenaIdx {
 			makerIdx := bestLvl.headIdx
 			maker := &b.arena[makerIdx]
 
@@ -549,10 +549,10 @@ func (b *ArenaBook) PlaceOrder(req OrderRequest, events []Event) []Event {
 			if maker.Leaves == 0 {
 				nextIdx := maker.NextIdx
 				bestLvl.headIdx = nextIdx
-				if nextIdx != 0 {
-					b.arena[nextIdx].PrevIdx = 0
+				if nextIdx != nilArenaIdx {
+					b.arena[nextIdx].PrevIdx = nilArenaIdx
 				} else {
-					bestLvl.tailIdx = 0
+					bestLvl.tailIdx = nilArenaIdx
 				}
 				bestLvl.orderCount--
 				b.orders.Delete(maker.ID)
@@ -628,13 +628,13 @@ func (b *ArenaBook) PlaceOrder(req OrderRequest, events []Event) []Event {
 		Leaves:   leaves,
 		Seq:      orderSeq,
 		PrevIdx:  tailIdx,
-		NextIdx:  0,
+		NextIdx:  nilArenaIdx,
 		TickIdx:  tickIdx,
 		Side:     req.Side,
 		Type:     Limit,
 	}
 
-	if tailIdx != 0 {
+	if tailIdx != nilArenaIdx {
 		b.arena[tailIdx].NextIdx = idx
 	} else {
 		lvl.headIdx = idx
@@ -671,12 +671,12 @@ func (b *ArenaBook) CancelOrder(id OrderID, events []Event) []Event {
 
 	prevIdx := o.PrevIdx
 	nextIdx := o.NextIdx
-	if prevIdx != 0 {
+	if prevIdx != nilArenaIdx {
 		b.arena[prevIdx].NextIdx = nextIdx
 	} else {
 		lvl.headIdx = nextIdx
 	}
-	if nextIdx != 0 {
+	if nextIdx != nilArenaIdx {
 		b.arena[nextIdx].PrevIdx = prevIdx
 	} else {
 		lvl.tailIdx = prevIdx
@@ -761,7 +761,7 @@ func (b *ArenaBook) Reset() {
 	b.bids.reset()
 	b.asks.reset()
 	b.orders.Clear()
-	b.freeHead = 0
+	b.freeHead = nilArenaIdx
 	b.highMark = 1
 	b.orderSeq = 0
 	b.eventSeq = 0

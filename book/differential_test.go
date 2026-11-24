@@ -74,7 +74,6 @@ func TestDifferentialAllImplementations(t *testing.T) {
 	}
 
 	for step := 0; step < totalOps; step++ {
-		// Random-walk mid-price within interior of price band.
 		if step%10 == 0 {
 			delta := int64(rng.Intn(3)-1) * cfg.TickSize
 			if mid+delta >= cfg.MinPrice+500 && mid+delta <= cfg.MaxPrice-500 {
@@ -86,20 +85,18 @@ func TestDifferentialAllImplementations(t *testing.T) {
 		roll := rng.Intn(100)
 		switch {
 		case roll < 2:
-			// Occasional invalid order (off-tick, non-lot, out-of-band, or duplicate).
 			op = diffOp{
 				req: book.OrderRequest{
 					ID:       nextID,
 					TraderID: book.TraderID(rng.Intn(8) + 1),
 					Side:     book.Buy,
 					Type:     book.Limit,
-					Price:    mid + 7, // off-tick
+					Price:    mid + 7,
 					Qty:      100,
 				},
 			}
 			nextID++
 		case roll < 32 && len(activeIDs) > 0:
-			// 30% Cancel (mix of active orders and occasional unknown ID).
 			if rng.Intn(20) == 0 {
 				op = diffOp{isCancel: true, cancelID: 999_999_999}
 			} else {
@@ -107,7 +104,6 @@ func TestDifferentialAllImplementations(t *testing.T) {
 				op = diffOp{isCancel: true, cancelID: pick}
 			}
 		case roll < 42:
-			// 10% Market order.
 			side := book.Buy
 			if rng.Intn(2) == 0 {
 				side = book.Sell
@@ -123,12 +119,11 @@ func TestDifferentialAllImplementations(t *testing.T) {
 			}
 			nextID++
 		default:
-			// ~58% Limit order distributed around mid (both passive and crossing).
 			side := book.Buy
 			if rng.Intn(2) == 0 {
 				side = book.Sell
 			}
-			offsetTicks := int64(rng.Intn(21) - 10) // [-10, +10] ticks around mid
+			offsetTicks := int64(rng.Intn(21) - 10)
 			price := mid + offsetTicks*cfg.TickSize
 			if price < cfg.MinPrice {
 				price = cfg.MinPrice
@@ -139,7 +134,7 @@ func TestDifferentialAllImplementations(t *testing.T) {
 			op = diffOp{
 				req: book.OrderRequest{
 					ID:       nextID,
-					TraderID: book.TraderID(rng.Intn(8) + 1), // 8 traders => frequent realistic STP collisions
+					TraderID: book.TraderID(rng.Intn(8) + 1),
 					Side:     side,
 					Type:     book.Limit,
 					Price:    price,
@@ -149,7 +144,6 @@ func TestDifferentialAllImplementations(t *testing.T) {
 			nextID++
 		}
 
-		// Execute op across all 16 Book variants + FastBook.
 		for i, b := range books {
 			if op.isCancel {
 				evBufs[i] = b.CancelOrder(op.cancelID, evBufs[i][:0])
@@ -165,7 +159,6 @@ func TestDifferentialAllImplementations(t *testing.T) {
 			arenaEvs = arenaBk.PlaceOrder(op.req, arenaEvs[:0])
 		}
 
-		// Assert identical event streams across all implementations.
 		refEvs := evBufs[0]
 		if len(fastEvs) != len(refEvs) {
 			t.Fatalf("step %d: FastBook produced %d events, ref produced %d", step, len(fastEvs), len(refEvs))
@@ -195,7 +188,6 @@ func TestDifferentialAllImplementations(t *testing.T) {
 			}
 		}
 
-		// Update conservation ledger & active ID tracker from reference events.
 		for _, ev := range refEvs {
 			switch ev.Type {
 			case book.EventAccepted:
@@ -235,7 +227,6 @@ func TestDifferentialAllImplementations(t *testing.T) {
 			}
 		}
 
-		// Periodically check full structural invariants on every implementation.
 		if step%500 == 0 {
 			for i, b := range books {
 				if err := b.CheckInvariants(); err != nil {
@@ -245,7 +236,6 @@ func TestDifferentialAllImplementations(t *testing.T) {
 		}
 	}
 
-	// Final invariant, depth, top-of-book, stats, and conservation verification.
 	refTop := books[0].TopOfBook()
 	refStats := books[0].Stats()
 	refBids, refAsks := books[0].Depth(1000, nil, nil)
@@ -283,7 +273,6 @@ func TestDifferentialAllImplementations(t *testing.T) {
 		}
 	}
 
-	// Cancel all remaining active orders on ref book and confirm total quantity conservation!
 	remaining := append([]book.OrderID(nil), activeIDs...)
 	for _, id := range remaining {
 		evBufs[0] = books[0].CancelOrder(id, evBufs[0][:0])

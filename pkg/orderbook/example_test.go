@@ -18,7 +18,6 @@ func ExampleNew() {
 		panic(err)
 	}
 
-	// Reusable event buffer for 0 allocs/op on the hot path.
 	events := make([]orderbook.Event, 0, 16)
 
 	events = bk.PlaceOrder(orderbook.OrderRequest{

@@ -4,18 +4,14 @@ import "math/bits"
 
 const (
 	orderMapInitCap = 2048
-	fibMul64        = 11400714819323198485 // floor(2^64 / phi)
+	fibMul64        = 11400714819323198485
 )
 
 type orderSlot struct {
-	key OrderID // 0 denotes an empty slot (valid OrderID >= 1)
+	key OrderID
 	val *Order
 }
 
-// orderMap is a single-threaded, flat open-addressed linear-probing hash table
-// keyed by OrderID. It uses Fibonacci hashing (1 multiply + 1 shift), maintains
-// <= 50% load factor, and uses backward-shift deletion so zero tombstones ever
-// accumulate and lookups/deletes inline without Go runtime map overhead.
 type orderMap struct {
 	slots []orderSlot
 	mask  uint64
@@ -95,8 +91,6 @@ func (m *orderMap) Set(id OrderID, val *Order) {
 	}
 }
 
-// Delete removes id in a single probe and returns its previous value, using
-// backward-shift deletion to preserve linear-probing invariants with zero tombstones.
 func (m *orderMap) Delete(id OrderID) (*Order, bool) {
 	mask := m.mask
 	i := m.hash(id)

@@ -50,11 +50,10 @@ func (pl *PriceLevel) Front() *Order {
 	return pl.Queue.Front()
 }
 
-// PopFront removes and returns the front order after its Leaves reached zero.
-// Note: TotalQty has already been decremented during matching.
 func (pl *PriceLevel) PopFront() *Order {
 	o := pl.Queue.PopFront()
 	if o != nil {
+		pl.TotalQty -= o.Leaves
 		pl.OrderCount--
 		o.Level = nil
 	}

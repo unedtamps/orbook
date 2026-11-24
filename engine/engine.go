@@ -2,6 +2,7 @@ package engine
 
 import (
 	"sync"
+	"sync/atomic"
 
 	"github.com/unedtamps/orbook/book"
 )
@@ -63,8 +64,7 @@ type Engine struct {
 	replyPool sync.Pool
 	startOnce sync.Once
 	stopOnce  sync.Once
-	started   bool
-	mu        sync.Mutex // guards started flag only (never touched on hot path)
+	started   atomic.Bool
 }
 
 // New creates an Engine owning b. Call Start() before submitting commands, and Stop()
@@ -94,9 +94,7 @@ func New(b *book.Book, opts Options) *Engine {
 // Start launches the single matching goroutine. Calling Start more than once is a no-op.
 func (e *Engine) Start() {
 	e.startOnce.Do(func() {
-		e.mu.Lock()
-		e.started = true
-		e.mu.Unlock()
+		e.started.Store(true)
 		go e.run()
 	})
 }
@@ -107,10 +105,7 @@ func (e *Engine) Start() {
 func (e *Engine) Stop() {
 	e.stopOnce.Do(func() {
 		close(e.in)
-		e.mu.Lock()
-		started := e.started
-		e.mu.Unlock()
-		if started {
+		if e.started.Load() {
 			<-e.done
 		}
 	})

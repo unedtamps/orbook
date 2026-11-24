@@ -240,9 +240,9 @@ func NewFastBook(cfg Config, poolPrewarm int) (*FastBook, error) {
 func (b *FastBook) growPool() {
 	slab := make([]Order, b.chunkSz)
 	for i := 0; i < len(slab)-1; i++ {
-		slab[i].Next = &slab[i+1]
+		slab[i].PoolNext = &slab[i+1]
 	}
-	slab[len(slab)-1].Next = b.freeHead
+	slab[len(slab)-1].PoolNext = b.freeHead
 	b.freeHead = &slab[0]
 }
 
@@ -251,16 +251,18 @@ func (b *FastBook) getOrder() *Order {
 		b.growPool()
 	}
 	o := b.freeHead
-	b.freeHead = o.Next
+	b.freeHead = o.PoolNext
 	o.Prev = nil
 	o.Next = nil
+	o.PoolNext = nil
 	return o
 }
 
 func (b *FastBook) putOrder(o *Order) {
 	o.Prev = nil
+	o.Next = nil
 	o.Level = nil
-	o.Next = b.freeHead
+	o.PoolNext = b.freeHead
 	b.freeHead = o
 }
 
@@ -411,7 +413,6 @@ func (b *FastBook) PlaceOrder(req OrderRequest, events []Event) []Event {
 			})
 
 			if maker.Leaves == 0 {
-				// Inline LinkedList PopFront.
 				bestLvl.head = maker.Next
 				if bestLvl.head != nil {
 					bestLvl.head.Prev = nil
@@ -492,7 +493,6 @@ func (b *FastBook) PlaceOrder(req OrderRequest, events []Event) []Event {
 
 	lvl, idx := own.getOrCreate(price)
 	o.QueuePos = uint64(idx)
-	// Inline LinkedList PushBack.
 	o.Prev = lvl.tail
 	o.Next = nil
 	if lvl.tail != nil {
@@ -530,7 +530,6 @@ func (b *FastBook) CancelOrder(id OrderID, events []Event) []Event {
 	idx := int(o.QueuePos)
 	lvl := &side.slots[idx]
 
-	// Inline LinkedList Remove.
 	if o.Prev != nil {
 		o.Prev.Next = o.Next
 	} else {

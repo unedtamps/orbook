@@ -127,7 +127,6 @@ func GenerateMixedWorkload(cfg book.Config, seed int64, warmupOrders, totalOps i
 		}
 	}
 
-	// Warmup: populate realistic two-sided book depth (1..100 ticks from mid).
 	warmup := make([]Op, 0, warmupOrders)
 	for i := 0; i < warmupOrders; i++ {
 		side := book.Buy
@@ -151,7 +150,6 @@ func GenerateMixedWorkload(cfg book.Config, seed int64, warmupOrders, totalOps i
 		applyEvents(evBuf, false)
 	}
 
-	// Main mixed workload: 60% limit, 30% cancel, 10% market.
 	ops := make([]Op, 0, totalOps)
 	minSafeTick := int64(200)
 	maxSafeTick := numTicks - 200
@@ -161,16 +159,14 @@ func GenerateMixedWorkload(cfg book.Config, seed int64, warmupOrders, totalOps i
 	}
 
 	for i := 0; i < totalOps; i++ {
-		// Random-walk the latent mid-price every 8 ops.
 		if i%8 == 0 {
-			step := int64(rng.Intn(3) - 1) // -1, 0, +1 tick
+			step := int64(rng.Intn(3) - 1)
 			nextMid := midTick + step
 			if nextMid >= minSafeTick && nextMid <= maxSafeTick {
 				midTick = nextMid
 			}
 		}
 
-		// Sync midTick softly toward current BBO mid if both sides exist.
 		if i%64 == 0 {
 			top := ref.TopOfBook()
 			if top.HasBid && top.HasAsk {
@@ -185,7 +181,6 @@ func GenerateMixedWorkload(cfg book.Config, seed int64, warmupOrders, totalOps i
 		roll := rng.Intn(100)
 		switch {
 		case roll < 30 && len(activeIDs) > 200:
-			// 30% Cancel an active resting order.
 			pick := activeIDs[rng.Intn(len(activeIDs))]
 			op := Op{Kind: OpCancel, CancelID: pick}
 			ops = append(ops, op)
@@ -194,7 +189,6 @@ func GenerateMixedWorkload(cfg book.Config, seed int64, warmupOrders, totalOps i
 			applyEvents(evBuf, true)
 
 		case roll < 40:
-			// 10% Market order.
 			side := book.Buy
 			if rng.Intn(2) == 1 {
 				side = book.Sell
@@ -213,14 +207,12 @@ func GenerateMixedWorkload(cfg book.Config, seed int64, warmupOrders, totalOps i
 			applyEvents(evBuf, true)
 
 		default:
-			// 60% Limit order (80% passive around 1..100 ticks behind mid, 20% crossing 0..5 ticks through mid).
 			side := book.Buy
 			if rng.Intn(2) == 1 {
 				side = book.Sell
 			}
 			var tick int64
 			if rng.Intn(100) < 20 {
-				// Aggressive / crossing limit order.
 				cross := int64(rng.Intn(6))
 				if side == book.Buy {
 					tick = midTick + cross
@@ -228,7 +220,6 @@ func GenerateMixedWorkload(cfg book.Config, seed int64, warmupOrders, totalOps i
 					tick = midTick - cross
 				}
 			} else {
-				// Passive resting limit order: concentrated near BBO (triangular-ish) + deeper book tail.
 				var offset int64
 				if rng.Intn(100) < 70 {
 					offset = int64(1 + rng.Intn(25))

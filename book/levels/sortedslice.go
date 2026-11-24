@@ -28,7 +28,6 @@ func NewSortedSlice(side book.Side, qFactory book.QueueFactory) book.PriceLevels
 func (s *SortedSlice) search(price int64) (int, bool) {
 	lo, hi := 0, len(s.levels)
 	if s.side == book.Buy {
-		// Ascending order: find smallest i where levels[i].Price >= price.
 		for lo < hi {
 			mid := int(uint(lo+hi) >> 1)
 			if s.levels[mid].Price < price {
@@ -38,7 +37,6 @@ func (s *SortedSlice) search(price int64) (int, bool) {
 			}
 		}
 	} else {
-		// Descending order: find smallest i where levels[i].Price <= price.
 		for lo < hi {
 			mid := int(uint(lo+hi) >> 1)
 			if s.levels[mid].Price > price {
@@ -87,7 +85,6 @@ func (s *SortedSlice) Get(price int64) *book.PriceLevel {
 }
 
 func (s *SortedSlice) GetOrCreate(price int64) *book.PriceLevel {
-	// Fast path: check tail (best level) first.
 	n := len(s.levels)
 	if n > 0 {
 		last := s.levels[n-1]
@@ -117,7 +114,6 @@ func (s *SortedSlice) Remove(price int64) {
 	if n == 0 {
 		return
 	}
-	// Fast path: removing the best level (tail) requires zero shifting.
 	if s.levels[n-1].Price == price {
 		lvl := s.levels[n-1]
 		s.levels[n-1] = nil

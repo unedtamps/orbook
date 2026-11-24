@@ -19,14 +19,12 @@ type Disruptor struct {
 	handler  EventHandler
 	eventBuf []book.Event
 
-	// Producer-owned fields (isolated on their own 64-byte cache line).
 	_          [64]byte
 	tail       atomic.Uint64
 	_          [56]byte
 	cachedHead uint64
 	_          [56]byte
 
-	// Consumer-owned fields (isolated on their own 64-byte cache line).
 	head       atomic.Uint64
 	_          [56]byte
 	cachedTail uint64
@@ -87,7 +85,6 @@ func (d *Disruptor) Stop() {
 func (d *Disruptor) Publish(cmd Command) {
 	t := d.tail.Load()
 	capRing := d.mask + 1
-	// Spin/yield only if ring appears full.
 	for t-d.cachedHead >= capRing {
 		d.cachedHead = d.head.Load()
 		if t-d.cachedHead >= capRing {
@@ -130,7 +127,6 @@ func (d *Disruptor) run() {
 			d.cachedTail = avail
 			if h == avail {
 				if d.closed.Load() {
-					// Final check after observing closed to guarantee nothing published before Stop is missed.
 					avail = d.tail.Load()
 					if h == avail {
 						return
@@ -148,7 +144,6 @@ func (d *Disruptor) run() {
 		}
 		spin = 0
 
-		// Drain all currently published commands in a tight loop, updating atomic head once.
 		for h < avail {
 			d.process(&d.buf[h&mask])
 			h++

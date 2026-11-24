@@ -9,7 +9,6 @@ import (
 )
 
 func TestDisruptorAndBatchEngineIdenticalToDirectBook(t *testing.T) {
-	// Build 3 identical books: direct reference, Disruptor, BatchEngine.
 	bRef := newTestBook(t)
 	bDis := newTestBook(t)
 	bBat := newTestBook(t)
@@ -17,7 +16,7 @@ func TestDisruptorAndBatchEngineIdenticalToDirectBook(t *testing.T) {
 	var refEvents, disEvents, batEvents []book.Event
 
 	dis := engine.NewDisruptor(bDis, engine.Options{
-		QueueSize: 256, // intentionally small to exercise wrap-around & backpressure
+		QueueSize: 256,
 		EventHandler: func(events []book.Event) {
 			disEvents = append(disEvents, events...)
 		},

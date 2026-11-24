@@ -13,7 +13,7 @@ import (
 
 const (
 	histMinNs = 1
-	histMaxNs = 50_000_000 // 50 ms ceiling
+	histMaxNs = 50_000_000
 	histSig   = 3
 )
 
@@ -74,7 +74,6 @@ func MeasureVariantLatency(v Variant, w *Workload) (VariantLatencyReport, error)
 	evBuf := make([]book.Event, 0, 64)
 	prewarm := len(w.Warmup) + 8192
 
-	// Pass 1: Pure throughput measurement (no per-op time.Now overhead).
 	runtime.GC()
 	b1, err := v.NewBook(w.Config, prewarm)
 	if err != nil {
@@ -90,7 +89,6 @@ func MeasureVariantLatency(v Variant, w *Workload) (VariantLatencyReport, error)
 	throughput := float64(len(w.Ops)) / elapsed.Seconds()
 	avgNs := float64(elapsed.Nanoseconds()) / float64(len(w.Ops))
 
-	// Pass 2: Per-operation HDR histogram recording.
 	runtime.GC()
 	b2, err := v.NewBook(w.Config, prewarm)
 	if err != nil {
@@ -119,9 +117,6 @@ func MeasureVariantLatency(v Variant, w *Workload) (VariantLatencyReport, error)
 			recordNs(hMarket, ns)
 		}
 	}
-
-	// Keep evBuf live to prevent dead-code elimination.
-	_ = len(evBuf)
 
 	return VariantLatencyReport{
 		Variant:       v,

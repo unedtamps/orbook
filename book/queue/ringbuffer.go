@@ -126,7 +126,6 @@ func (r *RingBuffer) compactOrGrow() {
 	capNow := len(r.buf)
 	mask := uint64(capNow - 1)
 
-	// If more than half of the slots are tombstones, compact in-place with zero allocation.
 	if r.count*2 < capNow {
 		write := r.head
 		for read := r.head; read < r.tail; read++ {
@@ -144,7 +143,6 @@ func (r *RingBuffer) compactOrGrow() {
 		return
 	}
 
-	// Otherwise grow 2x and pack live elements from index 0.
 	newBuf := make([]*book.Order, capNow*2)
 	var idx uint64
 	for read := r.head; read < r.tail; read++ {

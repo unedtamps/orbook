@@ -50,7 +50,6 @@ func NewRBTree(side book.Side, qFactory book.QueueFactory) book.PriceLevels {
 	return t
 }
 
-// better reports whether price a has strictly higher priority than price b.
 func (t *RBTree) better(a, b int64) bool {
 	if t.side == book.Buy {
 		return a > b
@@ -224,58 +223,64 @@ func (t *RBTree) transplant(u, v *rbNode) {
 	} else {
 		u.parent.right = v
 	}
-	v.parent = u.parent
+	if v != t.nilNode {
+		v.parent = u.parent
+	}
 }
 
-func (t *RBTree) deleteFixup(x *rbNode) {
+func (t *RBTree) deleteFixup(x, xParent *rbNode) {
 	for x != t.root && x.color == rbBlack {
-		if x == x.parent.left {
-			w := x.parent.right
+		if x == xParent.left {
+			w := xParent.right
 			if w.color == rbRed {
 				w.color = rbBlack
-				x.parent.color = rbRed
-				t.leftRotate(x.parent)
-				w = x.parent.right
+				xParent.color = rbRed
+				t.leftRotate(xParent)
+				w = xParent.right
 			}
 			if w.left.color == rbBlack && w.right.color == rbBlack {
 				w.color = rbRed
-				x = x.parent
+				x = xParent
+				xParent = x.parent
 			} else {
 				if w.right.color == rbBlack {
 					w.left.color = rbBlack
 					w.color = rbRed
 					t.rightRotate(w)
-					w = x.parent.right
+					w = xParent.right
 				}
-				w.color = x.parent.color
-				x.parent.color = rbBlack
+				w.color = xParent.color
+				xParent.color = rbBlack
 				w.right.color = rbBlack
-				t.leftRotate(x.parent)
+				t.leftRotate(xParent)
 				x = t.root
+				break
 			}
 		} else {
-			w := x.parent.left
+			w := xParent.left
 			if w.color == rbRed {
 				w.color = rbBlack
-				x.parent.color = rbRed
-				t.rightRotate(x.parent)
-				w = x.parent.left
+				xParent.color = rbRed
+				t.rightRotate(xParent)
+				w = xParent.left
 			}
 			if w.right.color == rbBlack && w.left.color == rbBlack {
 				w.color = rbRed
-				x = x.parent
+				x = xParent
+				xParent = x.parent
 			} else {
 				if w.left.color == rbBlack {
 					w.right.color = rbBlack
 					w.color = rbRed
 					t.leftRotate(w)
-					w = x.parent.left
+					w = xParent.left
 				}
-				w.color = x.parent.color
-				x.parent.color = rbBlack
+				w.color = xParent.color
+				xParent.color = rbBlack
 				w.left.color = rbBlack
-				t.rightRotate(x.parent)
+				t.rightRotate(xParent)
 				x = t.root
+				break
 			}
 		}
 	}
@@ -355,8 +360,6 @@ func (t *RBTree) Remove(price int64) {
 		return
 	}
 
-	// Because t.best is the leftmost node, its left child is always nilNode,
-	// so its in-order successor is invariant under RB-tree rotations.
 	removingBest := z == t.best
 	var nextBest *rbNode
 	if removingBest {
@@ -365,21 +368,24 @@ func (t *RBTree) Remove(price int64) {
 
 	y := z
 	yOrigColor := y.color
-	var x *rbNode
+	var x, xParent *rbNode
 
 	if z.left == t.nilNode {
 		x = z.right
+		xParent = z.parent
 		t.transplant(z, z.right)
 	} else if z.right == t.nilNode {
 		x = z.left
+		xParent = z.parent
 		t.transplant(z, z.left)
 	} else {
 		y = t.minNode(z.right)
 		yOrigColor = y.color
 		x = y.right
 		if y.parent == z {
-			x.parent = y
+			xParent = y
 		} else {
+			xParent = y.parent
 			t.transplant(y, y.right)
 			y.right = z.right
 			y.right.parent = y
@@ -391,10 +397,8 @@ func (t *RBTree) Remove(price int64) {
 	}
 
 	if yOrigColor == rbBlack {
-		t.deleteFixup(x)
+		t.deleteFixup(x, xParent)
 	}
-	// Restore sentinel parent cleanly.
-	t.sentinel.parent = t.nilNode
 
 	t.count--
 	if t.count == 0 {

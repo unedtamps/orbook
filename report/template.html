@@ -50,7 +50,6 @@
   .alloc-chg { color: var(--amber); font-weight: 600; }
   .muted { color: var(--muted); }
 
-  /* Side-by-side comparison layout */
   .sbs-headline { display: grid; grid-template-columns: 1fr auto 1fr; gap: 14px; align-items: center; margin: 14px 0; }
   .sbs-box { background: var(--card2); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
   .sbs-box.side-a { border-left: 3px solid var(--accent); }
@@ -87,7 +86,6 @@
     </table>
   </div>
 
-  <!-- Side-by-Side Comparison -->
   <div id="sbs-section">
     <h2>
       <span>Side-by-Side Variant Comparison</span>
@@ -199,7 +197,6 @@ function esc(s) {
 document.getElementById('meta-line').textContent =
   `Commit: ${DATA.meta.git_commit} | Go: ${DATA.meta.go_version} | CPU: ${DATA.meta.cpu || 'n/a'} | BenchTime: ${DATA.meta.bench_time} | Time: ${DATA.meta.timestamp}`;
 
-// KPI Cards
 (function renderKPIs() {
   const kpis = [];
   kpis.push({ label: 'Version', val: `v${String(DATA.version).padStart(3,'0')}`, sub: DATA.run_id });
@@ -230,7 +227,6 @@ document.getElementById('meta-line').textContent =
   });
 })();
 
-// Diff Table
 if (DATA.diff && DATA.diff.items && DATA.diff.items.length > 0) {
   const changed = DATA.diff.items.filter(d => d.status !== 'unchanged');
   if (changed.length > 0) {
@@ -249,7 +245,6 @@ if (DATA.diff && DATA.diff.items && DATA.diff.items.length > 0) {
   }
 }
 
-// Side-by-Side Comparison
 (function setupSideBySide() {
   const methods = [...new Set(DATA.benchmarks.map(b => b.method))];
   const allVariants = [...new Set(DATA.benchmarks.map(b => b.variant))];
@@ -357,7 +352,6 @@ if (DATA.diff && DATA.diff.items && DATA.diff.items.length > 0) {
     const ba = findBench(m, va);
     const bb = findBench(m, vb);
 
-    // Headline comparison
     const headline = document.getElementById('sbs-headline');
     if (ba && bb) {
       const hdrA = HDR_MAP.get(va);
@@ -396,13 +390,11 @@ if (DATA.diff && DATA.diff.items && DATA.diff.items.length > 0) {
         </div>`;
     }
 
-    // Side-by-side profiling hotspots
     document.getElementById('sbs-prof-method').textContent = m;
     document.getElementById('sbs-prof-cols').innerHTML =
       renderProfileColumn(`A: ${va}`, 'side-a', m, va) +
       renderProfileColumn(`B: ${vb}`, 'side-b', m, vb);
 
-    // All-methods matrix for Variant A vs Variant B
     document.getElementById('sbs-matrix-title').textContent = `${va} vs ${vb}`;
     const tbody = document.getElementById('sbs-matrix-body');
     tbody.innerHTML = '';
@@ -485,7 +477,6 @@ if (DATA.diff && DATA.diff.items && DATA.diff.items.length > 0) {
   renderSBS();
 })();
 
-// Method Ranking Chart
 (function setupMethodChart() {
   const methods = [...new Set(DATA.benchmarks.map(b => b.method))];
   const sel = document.getElementById('method-select');
@@ -516,7 +507,6 @@ if (DATA.diff && DATA.diff.items && DATA.diff.items.length > 0) {
   if (methods.length > 0) draw();
 })();
 
-// HDR Table
 if (DATA.latency && DATA.latency.length > 0) {
   document.getElementById('hdr-section').style.display = 'block';
   const tbody = document.getElementById('hdr-body');
@@ -529,7 +519,6 @@ if (DATA.latency && DATA.latency.length > 0) {
   });
 }
 
-// All Benchmarks Table
 (function setupBenchTable() {
   const input = document.getElementById('bench-filter');
   const tbody = document.getElementById('bench-body');
@@ -549,7 +538,6 @@ if (DATA.latency && DATA.latency.length > 0) {
   render();
 })();
 
-// Profile Explorer (single profile full view)
 if (DATA.profiles && DATA.profiles.length > 0) {
   document.getElementById('prof-section').style.display = 'block';
   const sel = document.getElementById('prof-select');

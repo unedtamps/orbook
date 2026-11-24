@@ -33,10 +33,9 @@ func TestQueuesBasicOperations(t *testing.T) {
 				t.Fatalf("got front %v, want %v", q.Front(), orders[0])
 			}
 
-			// Remove middle, head, tail.
-			q.Remove(orders[2]) // remaining: 1,2,4,5
-			q.Remove(orders[0]) // remaining: 2,4,5
-			q.Remove(orders[4]) // remaining: 2,4
+			q.Remove(orders[2])
+			q.Remove(orders[0])
+			q.Remove(orders[4])
 
 			if q.Len() != 2 {
 				t.Fatalf("got len %d, want 2", q.Len())
@@ -60,7 +59,6 @@ func TestQueuesBasicOperations(t *testing.T) {
 				t.Fatalf("expected empty queue after draining")
 			}
 
-			// Reuse after Reset.
 			q.PushBack(orders[0])
 			q.PushBack(orders[1])
 			q.Reset()
@@ -79,8 +77,6 @@ func TestRingBufferWrapAroundAndCompaction(t *testing.T) {
 	q := queue.NewRingBuffer()
 	var live []*book.Order
 
-	// Repeatedly push and remove middle elements to trigger in-place compaction
-	// across wrapped head/tail boundaries without unbounded growth.
 	nextID := book.OrderID(1)
 	for round := 0; round < 50; round++ {
 		for i := 0; i < 6; i++ {
@@ -89,14 +85,12 @@ func TestRingBufferWrapAroundAndCompaction(t *testing.T) {
 			q.PushBack(o)
 			live = append(live, o)
 		}
-		// Remove middle orders to create tombstones.
 		for len(live) > 3 {
 			idx := len(live) / 2
 			o := live[idx]
 			q.Remove(o)
 			live = append(live[:idx], live[idx+1:]...)
 		}
-		// Pop front once to advance head past wrap boundary.
 		front := q.PopFront()
 		if front != live[0] {
 			t.Fatalf("round %d: PopFront got %v, want %v", round, front, live[0])
@@ -130,7 +124,6 @@ func TestQueuesDifferentialRandom(t *testing.T) {
 		op := rng.Intn(100)
 		switch {
 		case op < 50 || len(llOrders) == 0:
-			// PushBack
 			o1 := &book.Order{ID: nextID}
 			o2 := &book.Order{ID: nextID}
 			nextID++
@@ -139,7 +132,6 @@ func TestQueuesDifferentialRandom(t *testing.T) {
 			llOrders = append(llOrders, o1)
 			rbOrders = append(rbOrders, o2)
 		case op < 75:
-			// PopFront
 			p1 := ll.PopFront()
 			p2 := rb.PopFront()
 			if p1.ID != p2.ID {
@@ -148,7 +140,6 @@ func TestQueuesDifferentialRandom(t *testing.T) {
 			llOrders = llOrders[1:]
 			rbOrders = rbOrders[1:]
 		default:
-			// Remove random element
 			idx := rng.Intn(len(llOrders))
 			ll.Remove(llOrders[idx])
 			rb.Remove(rbOrders[idx])

@@ -18,7 +18,6 @@ func RenderMarkdown(r *Report) string {
 		r.Meta.Timestamp.Format("2006-01-02 15:04:05 MST"),
 		r.Meta.GitCommit, r.Meta.GoVersion, r.Meta.CPU)
 
-	// Diff summary
 	if r.Diff != nil && len(r.Diff.Items) > 0 {
 		fmt.Fprintf(&sb, "## Diff vs Previous (`%s`, threshold ±%.1f%%)\n\n", r.Diff.BaseRunID, r.Diff.ThresholdPct)
 		sb.WriteString("| Benchmark | Status | Old (ns/op) | New (ns/op) | Delta | Allocs |\n")
@@ -39,7 +38,6 @@ func RenderMarkdown(r *Report) string {
 		sb.WriteString("\n")
 	}
 
-	// Micro-benchmarks
 	if len(r.Benchmarks) > 0 {
 		sb.WriteString("## Benchmarks\n\n")
 		sb.WriteString("| Method | Variant | ns/op | B/op | allocs/op |\n")
@@ -51,7 +49,6 @@ func RenderMarkdown(r *Report) string {
 		sb.WriteString("\n")
 	}
 
-	// HDR Latency
 	if len(r.Latency) > 0 {
 		sb.WriteString("## HDR Histogram Latency (Mixed Workload)\n\n")
 		sb.WriteString("| Variant | Throughput (ops/s) | Avg (ns) | p50 (ns) | p90 (ns) | p99 (ns) | p99.9 (ns) | Max (ns) |\n")
@@ -63,7 +60,6 @@ func RenderMarkdown(r *Report) string {
 		sb.WriteString("\n")
 	}
 
-	// Profiles
 	if len(r.Profiles) > 0 {
 		fmt.Fprintf(&sb, "## Profiling Hotspots (pprof — %d profiled benchmarks)\n\n", len(r.Profiles))
 		if len(r.Profiles) > 15 {

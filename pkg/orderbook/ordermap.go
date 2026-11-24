@@ -4,18 +4,15 @@ import "math/bits"
 
 const (
 	orderMapMinCap = 2048
-	fibMul64       = 11400714819323198485 // floor(2^64 / phi)
+	fibMul64       = 11400714819323198485
 )
 
-// mapSlot is 16 bytes and contains zero Go pointers (GC noscan).
 type mapSlot struct {
-	key OrderID // 8 B (0 = empty)
-	idx uint32  // 4 B (arena index >= 1)
-	_   uint32  // pad to 16 B
+	key OrderID
+	idx arenaIdx
+	_   uint32
 }
 
-// orderMap is a flat open-addressed linear-probing hash table using Fibonacci
-// hashing and backward-shift deletion (zero tombstones, zero pointers).
 type orderMap struct {
 	slots []mapSlot
 	mask  uint64
@@ -55,7 +52,7 @@ func (m *orderMap) Has(id OrderID) bool {
 	}
 }
 
-func (m *orderMap) Get(id OrderID) (uint32, bool) {
+func (m *orderMap) Get(id OrderID) (arenaIdx, bool) {
 	mask := m.mask
 	i := m.hash(id)
 	for {
@@ -64,13 +61,13 @@ func (m *orderMap) Get(id OrderID) (uint32, bool) {
 			return m.slots[i].idx, true
 		}
 		if k == 0 {
-			return 0, false
+			return nilArenaIdx, false
 		}
 		i = (i + 1) & mask
 	}
 }
 
-func (m *orderMap) Set(id OrderID, idx uint32) {
+func (m *orderMap) Set(id OrderID, idx arenaIdx) {
 	if m.count*2 >= len(m.slots) {
 		m.grow()
 	}
@@ -91,7 +88,7 @@ func (m *orderMap) Set(id OrderID, idx uint32) {
 	}
 }
 
-func (m *orderMap) Delete(id OrderID) (uint32, bool) {
+func (m *orderMap) Delete(id OrderID) (arenaIdx, bool) {
 	mask := m.mask
 	i := m.hash(id)
 	for {
@@ -116,7 +113,7 @@ func (m *orderMap) Delete(id OrderID) (uint32, bool) {
 			}
 		}
 		if k == 0 {
-			return 0, false
+			return nilArenaIdx, false
 		}
 		i = (i + 1) & mask
 	}

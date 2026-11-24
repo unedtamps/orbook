@@ -32,9 +32,9 @@ func NewFreeList(chunkSize, prewarm int) *FreeList {
 func (p *FreeList) grow() {
 	slab := make([]book.Order, p.chunkSize)
 	for i := 0; i < len(slab)-1; i++ {
-		slab[i].Next = &slab[i+1]
+		slab[i].PoolNext = &slab[i+1]
 	}
-	slab[len(slab)-1].Next = p.head
+	slab[len(slab)-1].PoolNext = p.head
 	p.head = &slab[0]
 	p.allocated += len(slab)
 	p.freeCount += len(slab)
@@ -46,7 +46,7 @@ func (p *FreeList) Get() *book.Order {
 		p.grow()
 	}
 	o := p.head
-	p.head = o.Next
+	p.head = o.PoolNext
 	p.freeCount--
 	*o = book.Order{}
 	return o
@@ -59,7 +59,8 @@ func (p *FreeList) Put(o *book.Order) {
 	}
 	o.Level = nil
 	o.Prev = nil
-	o.Next = p.head
+	o.Next = nil
+	o.PoolNext = p.head
 	p.head = o
 	p.freeCount++
 }

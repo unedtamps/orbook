@@ -141,7 +141,6 @@ func TestOrderValidationAndRejects(t *testing.T) {
 		}
 	}
 
-	// Valid order + duplicate ID rejection.
 	evs = b.PlaceOrder(book.OrderRequest{ID: 10, TraderID: 1, Side: book.Buy, Type: book.Limit, Price: 10000, Qty: 100}, evs[:0])
 	if len(evs) != 1 || evs[0].Type != book.EventAccepted {
 		t.Fatalf("expected Accepted, got %+v", evs)
@@ -151,13 +150,11 @@ func TestOrderValidationAndRejects(t *testing.T) {
 		t.Fatalf("expected RejectDuplicateOrderID, got %+v", evs)
 	}
 
-	// Cancel missing order.
 	evs = b.CancelOrder(999, evs[:0])
 	if len(evs) != 1 || evs[0].Type != book.EventRejected || evs[0].RejectReason != book.RejectOrderNotFound {
 		t.Fatalf("expected RejectOrderNotFound, got %+v", evs)
 	}
 
-	// Cancel order 10, then verify order ID 10 can be reused.
 	evs = b.CancelOrder(10, evs[:0])
 	if len(evs) != 1 || evs[0].Type != book.EventCancelled || evs[0].CancelReason != book.CancelUser {
 		t.Fatalf("expected CancelUser, got %+v", evs)
@@ -177,22 +174,13 @@ func TestAllVariantsMatchingScenarios(t *testing.T) {
 				b := buildBook(t, cfg, v)
 				var evs []book.Event
 
-				// Three asks at 10000 (FIFO: 1, 2, 3) and one ask at 10025 (4).
 				evs = b.PlaceOrder(book.OrderRequest{ID: 1, TraderID: 1, Side: book.Sell, Type: book.Limit, Price: 10000, Qty: 100}, evs[:0])
 				evs = b.PlaceOrder(book.OrderRequest{ID: 2, TraderID: 2, Side: book.Sell, Type: book.Limit, Price: 10000, Qty: 200}, evs[:0])
 				evs = b.PlaceOrder(book.OrderRequest{ID: 3, TraderID: 3, Side: book.Sell, Type: book.Limit, Price: 10000, Qty: 100}, evs[:0])
 				evs = b.PlaceOrder(book.OrderRequest{ID: 4, TraderID: 4, Side: book.Sell, Type: book.Limit, Price: 10025, Qty: 300}, evs[:0])
 
-				// Aggressive Buy at 10050 for 500 sweeps all of 10000 (400) + 100 of 10025.
 				evs = b.PlaceOrder(book.OrderRequest{ID: 10, TraderID: 9, Side: book.Buy, Type: book.Limit, Price: 10050, Qty: 500}, evs[:0])
 
-				// Expected sequence:
-				// Accepted(10),
-				// Trade(maker=1, p=10000, q=100), Done(1),
-				// Trade(maker=2, p=10000, q=200), Done(2),
-				// Trade(maker=3, p=10000, q=100), Done(3),
-				// Trade(maker=4, p=10025, q=100, makerLeaves=200),
-				// Done(10)
 				if len(evs) != 9 {
 					t.Fatalf("got %d events (%+v), want 9", len(evs), evs)
 				}
@@ -231,7 +219,6 @@ func TestAllVariantsMatchingScenarios(t *testing.T) {
 				b.PlaceOrder(book.OrderRequest{ID: 1, TraderID: 1, Side: book.Sell, Type: book.Limit, Price: 10000, Qty: 200}, evs[:0])
 				evs = b.PlaceOrder(book.OrderRequest{ID: 2, TraderID: 2, Side: book.Buy, Type: book.Limit, Price: 10025, Qty: 500}, evs[:0])
 
-				// Accepted(2), Trade(10000, 200, leaves=300), Done(1) -> 300 rests at 10025.
 				if len(evs) != 3 || evs[1].Type != book.EventTrade || evs[1].Leaves != 300 || evs[2].Type != book.EventDone {
 					t.Fatalf("unexpected events: %+v", evs)
 				}
@@ -251,18 +238,15 @@ func TestAllVariantsMatchingScenarios(t *testing.T) {
 				b := buildBook(t, cfg, v)
 				var evs []book.Event
 
-				// Market order on empty book -> Accepted + Cancelled(CancelMarketUnfilled).
 				evs = b.PlaceOrder(book.OrderRequest{ID: 1, TraderID: 1, Side: book.Buy, Type: book.Market, Qty: 300}, evs[:0])
 				if len(evs) != 2 || evs[0].Type != book.EventAccepted || evs[1].Type != book.EventCancelled ||
 					evs[1].CancelReason != book.CancelMarketUnfilled || evs[1].Qty != 300 {
 					t.Fatalf("empty market buy events: %+v", evs)
 				}
 
-				// Seed 2 bid levels: 10000 (100) and 9975 (200).
 				b.PlaceOrder(book.OrderRequest{ID: 2, TraderID: 1, Side: book.Buy, Type: book.Limit, Price: 10000, Qty: 100}, evs[:0])
 				b.PlaceOrder(book.OrderRequest{ID: 3, TraderID: 2, Side: book.Buy, Type: book.Limit, Price: 9975, Qty: 200}, evs[:0])
 
-				// Market Sell for 500 sweeps 300 and cancels 200 unfilled.
 				evs = b.PlaceOrder(book.OrderRequest{ID: 4, TraderID: 3, Side: book.Sell, Type: book.Market, Qty: 500}, evs[:0])
 				if len(evs) != 6 {
 					t.Fatalf("got %d events (%+v), want 6", len(evs), evs)
@@ -283,13 +267,9 @@ func TestAllVariantsMatchingScenarios(t *testing.T) {
 				b := buildBook(t, cfg, v)
 				var evs []book.Event
 
-				// Ask at 10000: Trader 2 (100), then Trader 1 (200).
 				b.PlaceOrder(book.OrderRequest{ID: 1, TraderID: 2, Side: book.Sell, Type: book.Limit, Price: 10000, Qty: 100}, evs[:0])
 				b.PlaceOrder(book.OrderRequest{ID: 2, TraderID: 1, Side: book.Sell, Type: book.Limit, Price: 10000, Qty: 200}, evs[:0])
 
-				// Trader 1 submits aggressive Buy at 10050 for 400:
-				// Must trade 100 with Trader 2, then cancel remaining 300 due to CancelSTP
-				// without resting and without touching Trader 1's resting Ask #2.
 				evs = b.PlaceOrder(book.OrderRequest{ID: 3, TraderID: 1, Side: book.Buy, Type: book.Limit, Price: 10050, Qty: 400}, evs[:0])
 				if len(evs) != 4 {
 					t.Fatalf("got %d events (%+v), want 4", len(evs), evs)
@@ -321,10 +301,8 @@ func TestAllVariantsMatchingScenarios(t *testing.T) {
 				b.PlaceOrder(book.OrderRequest{ID: 3, TraderID: 3, Side: book.Buy, Type: book.Limit, Price: 10000, Qty: 100}, evs[:0])
 				b.PlaceOrder(book.OrderRequest{ID: 4, TraderID: 4, Side: book.Buy, Type: book.Limit, Price: 9975, Qty: 400}, evs[:0])
 
-				// Partially fill front order #1 by 100 (leaves=200).
 				b.PlaceOrder(book.OrderRequest{ID: 5, TraderID: 9, Side: book.Sell, Type: book.Limit, Price: 10000, Qty: 100}, evs[:0])
 
-				// Cancel middle (#2), tail (#3), then partially-filled front (#1).
 				evs = b.CancelOrder(2, evs[:0])
 				if len(evs) != 1 || evs[0].Type != book.EventCancelled || evs[0].Qty != 200 {
 					t.Fatalf("cancel #2: %+v", evs)
@@ -338,7 +316,6 @@ func TestAllVariantsMatchingScenarios(t *testing.T) {
 					t.Fatalf("cancel #1 remaining leaves: %+v", evs)
 				}
 
-				// Level 10000 should now be gone; BestBid transitions to 9975.
 				bidP, bidQ, ok := b.BestBid()
 				if !ok || bidP != 9975 || bidQ != 400 {
 					t.Fatalf("BestBid = (%d, %d, %v), want (9975, 400, true)", bidP, bidQ, ok)
@@ -375,7 +352,6 @@ func TestAllVariantsMatchingScenarios(t *testing.T) {
 
 func TestZeroAllocHotPathWithPool(t *testing.T) {
 	cfg := defaultCfg()
-	// Check pooled variants achieve 0 allocs/op on steady-state Place+Cancel and Match.
 	for _, lk := range []string{"sortedslice", "btree", "rbtree", "ladder"} {
 		for _, qk := range []string{"linkedlist", "ringbuffer"} {
 			v := variantSpec{name: lk + "/" + qk + "/pool", levelKind: lk, queueKind: qk, usePool: true}
@@ -385,13 +361,11 @@ func TestZeroAllocHotPathWithPool(t *testing.T) {
 				bidsBuf := make([]book.DepthLevel, 0, 16)
 				asksBuf := make([]book.DepthLevel, 0, 16)
 
-				// Warm up levels, map buckets, and pool.
 				for i := 0; i < 20; i++ {
 					p := int64(9500 + i*25)
 					b.PlaceOrder(book.OrderRequest{ID: book.OrderID(i + 1), TraderID: 1, Side: book.Buy, Type: book.Limit, Price: p, Qty: 100}, evBuf[:0])
 					b.PlaceOrder(book.OrderRequest{ID: book.OrderID(i + 100), TraderID: 2, Side: book.Sell, Type: book.Limit, Price: p + 1000, Qty: 100}, evBuf[:0])
 				}
-				// Warm up target tick 10000.
 				b.PlaceOrder(book.OrderRequest{ID: 999, TraderID: 1, Side: book.Buy, Type: book.Limit, Price: 10000, Qty: 100}, evBuf[:0])
 				b.CancelOrder(999, evBuf[:0])
 

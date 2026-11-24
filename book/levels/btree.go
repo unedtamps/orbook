@@ -28,10 +28,8 @@ func NewBTree(side book.Side, qFactory book.QueueFactory) book.PriceLevels {
 func NewBTreeWithDegree(side book.Side, qFactory book.QueueFactory, degree int) book.PriceLevels {
 	var less btree.LessFunc[*book.PriceLevel]
 	if side == book.Buy {
-		// Higher price has higher priority (comes first in Ascend / Min).
 		less = func(a, b *book.PriceLevel) bool { return a.Price > b.Price }
 	} else {
-		// Lower price has higher priority (comes first in Ascend / Min).
 		less = func(a, b *book.PriceLevel) bool { return a.Price < b.Price }
 	}
 	fl := btree.NewFreeListG[*book.PriceLevel](64)

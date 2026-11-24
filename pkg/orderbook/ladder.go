@@ -42,39 +42,35 @@ func newLadder(side Side, cfg Config) ladder {
 	}
 }
 
-func (l *ladder) tickIdx(price int64) int {
-	if l.tickSize == 1 {
-		return int(price - l.minPrice)
+func (l *ladder) getOrCreateAt(tickIdx uint32, price int64) *priceLevel {
+	idx := int(tickIdx)
+	lvl := &l.slots[idx]
+	if (l.active[idx>>6] & (uint64(1) << uint(idx&63))) == 0 {
+		l.activate(idx, price)
 	}
-	return int((price - l.minPrice) / l.tickSize)
+	return lvl
 }
 
-func (l *ladder) getOrCreate(price int64) (*priceLevel, uint32) {
-	idx := l.tickIdx(price)
-	w := idx >> 6
-	bit := uint64(1) << uint(idx&63)
+func (l *ladder) activate(idx int, price int64) {
+	l.active[idx>>6] |= uint64(1) << uint(idx&63)
 	lvl := &l.slots[idx]
-	if (l.active[w] & bit) == 0 {
-		l.active[w] |= bit
-		lvl.price = price
-		lvl.totalQty = 0
-		lvl.orderCount = 0
-		lvl.headIdx = 0
-		lvl.tailIdx = 0
-		l.count++
-		if l.bestIdx < 0 {
+	lvl.price = price
+	lvl.totalQty = 0
+	lvl.orderCount = 0
+	lvl.headIdx = 0
+	lvl.tailIdx = 0
+	l.count++
+	if l.bestIdx < 0 {
+		l.bestIdx = idx
+	} else if l.side == Buy {
+		if idx > l.bestIdx {
 			l.bestIdx = idx
-		} else if l.side == Buy {
-			if idx > l.bestIdx {
-				l.bestIdx = idx
-			}
-		} else {
-			if idx < l.bestIdx {
-				l.bestIdx = idx
-			}
+		}
+	} else {
+		if idx < l.bestIdx {
+			l.bestIdx = idx
 		}
 	}
-	return lvl, uint32(idx)
 }
 
 func (l *ladder) removeAt(idx int) {

@@ -197,6 +197,10 @@ func (r CancelReason) String() string {
 	}
 }
 
+// MaxTicks is the maximum number of discrete price ticks permitted by Config.Validate
+// to guard against unbounded upfront ladder allocations (~64 B per tick across both sides).
+const MaxTicks = 1_000_000
+
 // Config defines tick/lot validation rules, price band bounds, and initial arena
 // capacity for a single ticker book.
 type Config struct {
@@ -208,7 +212,7 @@ type Config struct {
 	InitialCapacity int // Optional pre-allocated order capacity (defaults to 4096).
 }
 
-// Validate checks that Config defines a valid positive tick/lot and price band.
+// Validate checks that Config defines a valid positive tick/lot and bounded price band.
 func (c Config) Validate() error {
 	if c.TickSize <= 0 {
 		return fmt.Errorf("orderbook: TickSize must be > 0, got %d", c.TickSize)
@@ -222,8 +226,12 @@ func (c Config) Validate() error {
 	if c.MaxPrice < c.MinPrice {
 		return fmt.Errorf("orderbook: MaxPrice (%d) must be >= MinPrice (%d)", c.MaxPrice, c.MinPrice)
 	}
-	if (c.MaxPrice-c.MinPrice)%c.TickSize != 0 {
+	span := c.MaxPrice - c.MinPrice
+	if span%c.TickSize != 0 {
 		return fmt.Errorf("orderbook: price range [%d, %d] is not a multiple of TickSize %d", c.MinPrice, c.MaxPrice, c.TickSize)
+	}
+	if span/c.TickSize >= MaxTicks {
+		return fmt.Errorf("orderbook: tick count exceeds MaxTicks (%d)", MaxTicks)
 	}
 	return nil
 }
@@ -255,20 +263,21 @@ type ModifyRequest struct {
 }
 
 // Event is a pointer-free value record emitted by matching operations.
+// Fields are ordered largest-to-smallest to eliminate internal alignment padding (88 B).
 type Event struct {
 	Seq           uint64
-	Type          EventType
 	TradeID       uint64
 	OrderID       OrderID
 	TraderID      TraderID
 	MakerOrderID  OrderID
 	MakerTraderID TraderID
-	Side          Side
-	OrderType     OrderType
 	Price         int64
 	Qty           int64
 	Leaves        int64
 	MakerLeaves   int64
+	Type          EventType
+	Side          Side
+	OrderType     OrderType
 	RejectReason  RejectReason
 	CancelReason  CancelReason
 }

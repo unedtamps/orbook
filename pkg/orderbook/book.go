@@ -30,16 +30,23 @@ type arenaOrder struct {
 //
 // Book is NOT safe for concurrent use; run one *Book per ticker on a dedicated goroutine.
 type Book struct {
-	cfg      Config
-	bids     ladder
-	asks     ladder
-	orders   orderMap
-	arena    []arenaOrder // index 0 is reserved nil sentinel
-	freeHead uint32
-	highMark uint32
-	orderSeq uint64
-	eventSeq uint64
-	tradeSeq uint64
+	cfg        Config
+	bids       ladder
+	asks       ladder
+	orders     orderMap
+	arena      []arenaOrder // index 0 is reserved nil sentinel
+	freeHead   uint32
+	highMark   uint32
+	orderSeq   uint64
+	eventSeq   uint64
+	tradeSeq   uint64
+	inCallback bool
+}
+
+func (b *Book) assertNotInCallback() {
+	if b.inCallback {
+		panic("orderbook: re-entrant mutation during callback is not allowed")
+	}
 }
 
 // New constructs a new single-ticker *Book validated against cfg.
@@ -82,17 +89,22 @@ func (b *Book) freeOrder(idx uint32) {
 	b.freeHead = idx
 }
 
-func (b *Book) validatePrice(price int64) RejectReason {
+func (b *Book) validatePrice(price int64) (uint32, RejectReason) {
 	if price <= 0 {
-		return RejectInvalidPrice
+		return 0, RejectInvalidPrice
 	}
 	if price < b.cfg.MinPrice || price > b.cfg.MaxPrice {
-		return RejectOutOfPriceBand
+		return 0, RejectOutOfPriceBand
 	}
-	if b.cfg.TickSize != 1 && (price-b.cfg.MinPrice)%b.cfg.TickSize != 0 {
-		return RejectOffTickPrice
+	delta := price - b.cfg.MinPrice
+	if b.cfg.TickSize == 1 {
+		return uint32(delta), RejectNone
 	}
-	return RejectNone
+	tickIdx := delta / b.cfg.TickSize
+	if tickIdx*b.cfg.TickSize != delta {
+		return 0, RejectOffTickPrice
+	}
+	return uint32(tickIdx), RejectNone
 }
 
 func (b *Book) validateQty(qty int64) RejectReason {
@@ -105,34 +117,37 @@ func (b *Book) validateQty(qty int64) RejectReason {
 	return RejectNone
 }
 
-func (b *Book) validateOrder(req OrderRequest) RejectReason {
+func (b *Book) validateOrder(req OrderRequest) (uint32, RejectReason) {
 	if req.ID == 0 {
-		return RejectInvalidOrderID
+		return 0, RejectInvalidOrderID
 	}
 	if req.Side != Buy && req.Side != Sell {
-		return RejectInvalidSide
+		return 0, RejectInvalidSide
 	}
 	if req.Type != Limit && req.Type != Market {
-		return RejectInvalidType
+		return 0, RejectInvalidType
 	}
 	if req.TimeInForce > PostOnly {
-		return RejectInvalidTimeInForce
+		return 0, RejectInvalidTimeInForce
 	}
 	if req.Type == Market && req.TimeInForce == PostOnly {
-		return RejectInvalidTimeInForce
+		return 0, RejectInvalidTimeInForce
 	}
 	if r := b.validateQty(req.Qty); r != RejectNone {
-		return r
+		return 0, r
 	}
+	var tickIdx uint32
 	if req.Type == Limit {
-		if r := b.validatePrice(req.Price); r != RejectNone {
-			return r
+		var r RejectReason
+		tickIdx, r = b.validatePrice(req.Price)
+		if r != RejectNone {
+			return 0, r
 		}
 	}
 	if b.orders.Has(req.ID) {
-		return RejectDuplicateOrderID
+		return 0, RejectDuplicateOrderID
 	}
-	return RejectNone
+	return tickIdx, RejectNone
 }
 
 func wouldCross(opp *ladder, side Side, price int64) bool {
@@ -216,7 +231,9 @@ func (b *Book) canFillFOK(opp *ladder, side Side, oType OrderType, limitPrice, n
 // Supports GTC, IOC, FOK, and PostOnly TimeInForce.
 // Produced events are appended to dst and the extended slice is returned.
 func (b *Book) PlaceOrder(req OrderRequest, dst []Event) []Event {
-	if reason := b.validateOrder(req); reason != RejectNone {
+	b.assertNotInCallback()
+	tickIdx, reason := b.validateOrder(req)
+	if reason != RejectNone {
 		b.eventSeq++
 		return append(dst, Event{
 			Seq:          b.eventSeq,
@@ -277,7 +294,7 @@ func (b *Book) PlaceOrder(req OrderRequest, dst []Event) []Event {
 				CancelReason: CancelPostOnly,
 			})
 		}
-		b.restLimit(own, req.ID, req.TraderID, req.Side, price, req.Qty, leaves, orderSeq)
+		b.restLimit(own, tickIdx, req.ID, req.TraderID, price, req.Qty, leaves, orderSeq)
 		return dst
 	}
 
@@ -298,25 +315,27 @@ func (b *Book) PlaceOrder(req OrderRequest, dst []Event) []Event {
 		})
 	}
 
-	var stpTriggered bool
-	leaves, stpTriggered, dst = b.matchSlice(opp, req.ID, req.TraderID, req.Side, req.Type, price, leaves, dst)
-	if stpTriggered {
-		return dst
-	}
+	if req.Type == Market || wouldCross(opp, req.Side, price) {
+		var stpTriggered bool
+		leaves, stpTriggered, dst = b.matchSlice(opp, req.ID, req.TraderID, req.Side, req.Type, price, leaves, dst)
+		if stpTriggered {
+			return dst
+		}
 
-	if leaves == 0 {
-		b.eventSeq++
-		return append(dst, Event{
-			Seq:       b.eventSeq,
-			Type:      EventDone,
-			OrderID:   req.ID,
-			TraderID:  req.TraderID,
-			Side:      req.Side,
-			OrderType: req.Type,
-			Price:     price,
-			Qty:       req.Qty,
-			Leaves:    0,
-		})
+		if leaves == 0 {
+			b.eventSeq++
+			return append(dst, Event{
+				Seq:       b.eventSeq,
+				Type:      EventDone,
+				OrderID:   req.ID,
+				TraderID:  req.TraderID,
+				Side:      req.Side,
+				OrderType: req.Type,
+				Price:     price,
+				Qty:       req.Qty,
+				Leaves:    0,
+			})
+		}
 	}
 
 	if req.Type == Market {
@@ -351,20 +370,26 @@ func (b *Book) PlaceOrder(req OrderRequest, dst []Event) []Event {
 		})
 	}
 
-	b.restLimit(own, req.ID, req.TraderID, req.Side, price, req.Qty, leaves, orderSeq)
+	b.restLimit(own, tickIdx, req.ID, req.TraderID, price, req.Qty, leaves, orderSeq)
 	return dst
 }
 
 // PlaceOrderWithCallback streams every produced Event directly to fn with zero
 // intermediate slice buffering. If fn is nil, events are discarded.
 func (b *Book) PlaceOrderWithCallback(req OrderRequest, fn func(Event)) {
+	b.assertNotInCallback()
+	if fn != nil {
+		b.inCallback = true
+		defer func() { b.inCallback = false }()
+	}
 	emit := func(ev Event) {
 		if fn != nil {
 			fn(ev)
 		}
 	}
 
-	if reason := b.validateOrder(req); reason != RejectNone {
+	tickIdx, reason := b.validateOrder(req)
+	if reason != RejectNone {
 		b.eventSeq++
 		emit(Event{
 			Seq:          b.eventSeq,
@@ -426,7 +451,7 @@ func (b *Book) PlaceOrderWithCallback(req OrderRequest, fn func(Event)) {
 			})
 			return
 		}
-		b.restLimit(own, req.ID, req.TraderID, req.Side, price, req.Qty, leaves, orderSeq)
+		b.restLimit(own, tickIdx, req.ID, req.TraderID, price, req.Qty, leaves, orderSeq)
 		return
 	}
 
@@ -447,26 +472,28 @@ func (b *Book) PlaceOrderWithCallback(req OrderRequest, fn func(Event)) {
 		return
 	}
 
-	var stpTriggered bool
-	leaves, stpTriggered = b.matchCallback(opp, req.ID, req.TraderID, req.Side, req.Type, price, leaves, fn)
-	if stpTriggered {
-		return
-	}
+	if req.Type == Market || wouldCross(opp, req.Side, price) {
+		var stpTriggered bool
+		leaves, stpTriggered = b.matchCallback(opp, req.ID, req.TraderID, req.Side, req.Type, price, leaves, fn)
+		if stpTriggered {
+			return
+		}
 
-	if leaves == 0 {
-		b.eventSeq++
-		emit(Event{
-			Seq:       b.eventSeq,
-			Type:      EventDone,
-			OrderID:   req.ID,
-			TraderID:  req.TraderID,
-			Side:      req.Side,
-			OrderType: req.Type,
-			Price:     price,
-			Qty:       req.Qty,
-			Leaves:    0,
-		})
-		return
+		if leaves == 0 {
+			b.eventSeq++
+			emit(Event{
+				Seq:       b.eventSeq,
+				Type:      EventDone,
+				OrderID:   req.ID,
+				TraderID:  req.TraderID,
+				Side:      req.Side,
+				OrderType: req.Type,
+				Price:     price,
+				Qty:       req.Qty,
+				Leaves:    0,
+			})
+			return
+		}
 	}
 
 	if req.Type == Market {
@@ -503,7 +530,7 @@ func (b *Book) PlaceOrderWithCallback(req OrderRequest, fn func(Event)) {
 		return
 	}
 
-	b.restLimit(own, req.ID, req.TraderID, req.Side, price, req.Qty, leaves, orderSeq)
+	b.restLimit(own, tickIdx, req.ID, req.TraderID, price, req.Qty, leaves, orderSeq)
 }
 
 func (b *Book) matchSlice(opp *ladder, orderID OrderID, traderID TraderID, side Side, oType OrderType, price, leaves int64, dst []Event) (int64, bool, []Event) {
@@ -665,6 +692,32 @@ func (b *Book) matchCallback(opp *ladder, orderID OrderID, traderID TraderID, si
 			maker.Leaves -= matchQty
 			bestLvl.totalQty -= matchQty
 
+			makerID := maker.ID
+			makerTraderID := maker.TraderID
+			makerSide := maker.Side
+			makerType := maker.Type
+			makerPrice := maker.Price
+			makerQty := maker.Qty
+			makerLeaves := maker.Leaves
+
+			// Commit all book mutations before invoking user callbacks so read-only
+			// queries inside fn always observe a consistent book state.
+			if makerLeaves == 0 {
+				nextIdx := maker.NextIdx
+				bestLvl.headIdx = nextIdx
+				if nextIdx != 0 {
+					b.arena[nextIdx].PrevIdx = 0
+				} else {
+					bestLvl.tailIdx = 0
+				}
+				bestLvl.orderCount--
+				b.orders.Delete(makerID)
+				b.freeOrder(makerIdx)
+				if bestLvl.orderCount == 0 {
+					opp.removeAt(bestIdx)
+				}
+			}
+
 			b.tradeSeq++
 			b.eventSeq++
 			if fn != nil {
@@ -674,49 +727,35 @@ func (b *Book) matchCallback(opp *ladder, orderID OrderID, traderID TraderID, si
 					TradeID:       b.tradeSeq,
 					OrderID:       orderID,
 					TraderID:      traderID,
-					MakerOrderID:  maker.ID,
-					MakerTraderID: maker.TraderID,
+					MakerOrderID:  makerID,
+					MakerTraderID: makerTraderID,
 					Side:          side,
 					OrderType:     oType,
-					Price:         maker.Price,
+					Price:         makerPrice,
 					Qty:           matchQty,
 					Leaves:        leaves,
-					MakerLeaves:   maker.Leaves,
+					MakerLeaves:   makerLeaves,
 				})
 			}
 
-			if maker.Leaves == 0 {
-				nextIdx := maker.NextIdx
-				bestLvl.headIdx = nextIdx
-				if nextIdx != 0 {
-					b.arena[nextIdx].PrevIdx = 0
-				} else {
-					bestLvl.tailIdx = 0
-				}
-				bestLvl.orderCount--
-				b.orders.Delete(maker.ID)
-
+			if makerLeaves == 0 {
 				b.eventSeq++
 				if fn != nil {
 					fn(Event{
 						Seq:       b.eventSeq,
 						Type:      EventDone,
-						OrderID:   maker.ID,
-						TraderID:  maker.TraderID,
-						Side:      maker.Side,
-						OrderType: maker.Type,
-						Price:     maker.Price,
-						Qty:       maker.Qty,
+						OrderID:   makerID,
+						TraderID:  makerTraderID,
+						Side:      makerSide,
+						OrderType: makerType,
+						Price:     makerPrice,
+						Qty:       makerQty,
 						Leaves:    0,
 					})
 				}
-				b.freeOrder(makerIdx)
 			}
 		}
 
-		if bestLvl.orderCount == 0 {
-			opp.removeAt(bestIdx)
-		}
 		if stpTriggered {
 			break
 		}
@@ -728,6 +767,7 @@ func (b *Book) matchCallback(opp *ladder, orderID OrderID, traderID TraderID, si
 //   - Same price & NewQty < current Leaves: modifies in-place, preserving FIFO priority.
 //   - Price change or NewQty > current Leaves: loses priority, re-matches if crossing, and rests remainder.
 func (b *Book) ModifyOrder(req ModifyRequest, dst []Event) []Event {
+	b.assertNotInCallback()
 	idx, ok := b.orders.Get(req.ID)
 	if !ok {
 		b.eventSeq++
@@ -741,6 +781,7 @@ func (b *Book) ModifyOrder(req ModifyRequest, dst []Event) []Event {
 
 	o := &b.arena[idx]
 	newPrice := req.NewPrice
+	newTickIdx := o.TickIdx
 	if newPrice == 0 {
 		newPrice = o.Price
 	}
@@ -749,19 +790,23 @@ func (b *Book) ModifyOrder(req ModifyRequest, dst []Event) []Event {
 		newLeaves = o.Leaves
 	}
 
-	if r := b.validatePrice(newPrice); r != RejectNone {
-		b.eventSeq++
-		return append(dst, Event{
-			Seq:          b.eventSeq,
-			Type:         EventRejected,
-			OrderID:      req.ID,
-			TraderID:     o.TraderID,
-			Side:         o.Side,
-			OrderType:    Limit,
-			Price:        newPrice,
-			Qty:          newLeaves,
-			RejectReason: r,
-		})
+	if newPrice != o.Price {
+		var r RejectReason
+		newTickIdx, r = b.validatePrice(newPrice)
+		if r != RejectNone {
+			b.eventSeq++
+			return append(dst, Event{
+				Seq:          b.eventSeq,
+				Type:         EventRejected,
+				OrderID:      req.ID,
+				TraderID:     o.TraderID,
+				Side:         o.Side,
+				OrderType:    Limit,
+				Price:        newPrice,
+				Qty:          newLeaves,
+				RejectReason: r,
+			})
+		}
 	}
 	if r := b.validateQty(newLeaves); r != RejectNone {
 		b.eventSeq++
@@ -799,11 +844,38 @@ func (b *Book) ModifyOrder(req ModifyRequest, dst []Event) []Event {
 		own, opp = &b.asks, &b.bids
 	}
 
-	// Fast path: same price and quantity reduced -> keep FIFO time priority in-place!
-	if newPrice == o.Price && newLeaves < o.Leaves {
-		diff := o.Leaves - newLeaves
-		o.Leaves = newLeaves
-		own.slots[o.TickIdx].totalQty -= diff
+	// Fast paths for same-price modifications (already uncrossed, no map/arena churn).
+	if newPrice == o.Price {
+		lvl := &own.slots[o.TickIdx]
+		if newLeaves < o.Leaves {
+			// Quantity reduced -> keep FIFO time priority in-place.
+			lvl.totalQty -= o.Leaves - newLeaves
+			o.Qty = newLeaves
+			o.Leaves = newLeaves
+		} else {
+			// Quantity increased -> lose FIFO time priority by moving to tail of the same level.
+			lvl.totalQty += newLeaves - o.Leaves
+			b.orderSeq++
+			o.Qty = newLeaves
+			o.Leaves = newLeaves
+			o.Seq = b.orderSeq
+			if lvl.tailIdx != idx {
+				prevIdx := o.PrevIdx
+				nextIdx := o.NextIdx
+				if prevIdx != 0 {
+					b.arena[prevIdx].NextIdx = nextIdx
+				} else {
+					lvl.headIdx = nextIdx
+				}
+				b.arena[nextIdx].PrevIdx = prevIdx
+
+				oldTail := lvl.tailIdx
+				b.arena[oldTail].NextIdx = idx
+				o.PrevIdx = oldTail
+				o.NextIdx = 0
+				lvl.tailIdx = idx
+			}
+		}
 
 		b.eventSeq++
 		return append(dst, Event{
@@ -819,7 +891,7 @@ func (b *Book) ModifyOrder(req ModifyRequest, dst []Event) []Event {
 		})
 	}
 
-	// Price changed or quantity increased -> lose time priority, unlink, re-match if crossing.
+	// Price changed -> lose time priority, unlink, re-match if crossing.
 	traderID := o.TraderID
 	side := o.Side
 	b.unlinkAndFree(own, idx)
@@ -841,31 +913,40 @@ func (b *Book) ModifyOrder(req ModifyRequest, dst []Event) []Event {
 		Leaves:    newLeaves,
 	})
 
-	leaves, stpTriggered, dst := b.matchSlice(opp, req.ID, traderID, side, Limit, newPrice, newLeaves, dst)
-	if stpTriggered {
-		return dst
-	}
-	if leaves == 0 {
-		b.eventSeq++
-		return append(dst, Event{
-			Seq:       b.eventSeq,
-			Type:      EventDone,
-			OrderID:   req.ID,
-			TraderID:  traderID,
-			Side:      side,
-			OrderType: Limit,
-			Price:     newPrice,
-			Qty:       newLeaves,
-			Leaves:    0,
-		})
+	leaves := newLeaves
+	if wouldCross(opp, side, newPrice) {
+		var stpTriggered bool
+		leaves, stpTriggered, dst = b.matchSlice(opp, req.ID, traderID, side, Limit, newPrice, newLeaves, dst)
+		if stpTriggered {
+			return dst
+		}
+		if leaves == 0 {
+			b.eventSeq++
+			return append(dst, Event{
+				Seq:       b.eventSeq,
+				Type:      EventDone,
+				OrderID:   req.ID,
+				TraderID:  traderID,
+				Side:      side,
+				OrderType: Limit,
+				Price:     newPrice,
+				Qty:       newLeaves,
+				Leaves:    0,
+			})
+		}
 	}
 
-	b.restLimit(own, req.ID, traderID, side, newPrice, newLeaves, leaves, orderSeq)
+	b.restLimit(own, newTickIdx, req.ID, traderID, newPrice, newLeaves, leaves, orderSeq)
 	return dst
 }
 
 // ModifyOrderWithCallback amends a resting limit order and streams events to fn.
 func (b *Book) ModifyOrderWithCallback(req ModifyRequest, fn func(Event)) {
+	b.assertNotInCallback()
+	if fn != nil {
+		b.inCallback = true
+		defer func() { b.inCallback = false }()
+	}
 	emit := func(ev Event) {
 		if fn != nil {
 			fn(ev)
@@ -886,6 +967,7 @@ func (b *Book) ModifyOrderWithCallback(req ModifyRequest, fn func(Event)) {
 
 	o := &b.arena[idx]
 	newPrice := req.NewPrice
+	newTickIdx := o.TickIdx
 	if newPrice == 0 {
 		newPrice = o.Price
 	}
@@ -894,20 +976,24 @@ func (b *Book) ModifyOrderWithCallback(req ModifyRequest, fn func(Event)) {
 		newLeaves = o.Leaves
 	}
 
-	if r := b.validatePrice(newPrice); r != RejectNone {
-		b.eventSeq++
-		emit(Event{
-			Seq:          b.eventSeq,
-			Type:         EventRejected,
-			OrderID:      req.ID,
-			TraderID:     o.TraderID,
-			Side:         o.Side,
-			OrderType:    Limit,
-			Price:        newPrice,
-			Qty:          newLeaves,
-			RejectReason: r,
-		})
-		return
+	if newPrice != o.Price {
+		var r RejectReason
+		newTickIdx, r = b.validatePrice(newPrice)
+		if r != RejectNone {
+			b.eventSeq++
+			emit(Event{
+				Seq:          b.eventSeq,
+				Type:         EventRejected,
+				OrderID:      req.ID,
+				TraderID:     o.TraderID,
+				Side:         o.Side,
+				OrderType:    Limit,
+				Price:        newPrice,
+				Qty:          newLeaves,
+				RejectReason: r,
+			})
+			return
+		}
 	}
 	if r := b.validateQty(newLeaves); r != RejectNone {
 		b.eventSeq++
@@ -947,10 +1033,35 @@ func (b *Book) ModifyOrderWithCallback(req ModifyRequest, fn func(Event)) {
 		own, opp = &b.asks, &b.bids
 	}
 
-	if newPrice == o.Price && newLeaves < o.Leaves {
-		diff := o.Leaves - newLeaves
-		o.Leaves = newLeaves
-		own.slots[o.TickIdx].totalQty -= diff
+	if newPrice == o.Price {
+		lvl := &own.slots[o.TickIdx]
+		if newLeaves < o.Leaves {
+			lvl.totalQty -= o.Leaves - newLeaves
+			o.Qty = newLeaves
+			o.Leaves = newLeaves
+		} else {
+			lvl.totalQty += newLeaves - o.Leaves
+			b.orderSeq++
+			o.Qty = newLeaves
+			o.Leaves = newLeaves
+			o.Seq = b.orderSeq
+			if lvl.tailIdx != idx {
+				prevIdx := o.PrevIdx
+				nextIdx := o.NextIdx
+				if prevIdx != 0 {
+					b.arena[prevIdx].NextIdx = nextIdx
+				} else {
+					lvl.headIdx = nextIdx
+				}
+				b.arena[nextIdx].PrevIdx = prevIdx
+
+				oldTail := lvl.tailIdx
+				b.arena[oldTail].NextIdx = idx
+				o.PrevIdx = oldTail
+				o.NextIdx = 0
+				lvl.tailIdx = idx
+			}
+		}
 
 		b.eventSeq++
 		emit(Event{
@@ -974,6 +1085,25 @@ func (b *Book) ModifyOrderWithCallback(req ModifyRequest, fn func(Event)) {
 
 	b.orderSeq++
 	orderSeq := b.orderSeq
+
+	// For non-crossing modifies, rest the amended order before emitting EventModified
+	// so callbacks observe the resting order in a consistent state.
+	if !wouldCross(opp, side, newPrice) {
+		b.restLimit(own, newTickIdx, req.ID, traderID, newPrice, newLeaves, newLeaves, orderSeq)
+		b.eventSeq++
+		emit(Event{
+			Seq:       b.eventSeq,
+			Type:      EventModified,
+			OrderID:   req.ID,
+			TraderID:  traderID,
+			Side:      side,
+			OrderType: Limit,
+			Price:     newPrice,
+			Qty:       newLeaves,
+			Leaves:    newLeaves,
+		})
+		return
+	}
 
 	b.eventSeq++
 	emit(Event{
@@ -1008,7 +1138,7 @@ func (b *Book) ModifyOrderWithCallback(req ModifyRequest, fn func(Event)) {
 		return
 	}
 
-	b.restLimit(own, req.ID, traderID, side, newPrice, newLeaves, leaves, orderSeq)
+	b.restLimit(own, newTickIdx, req.ID, traderID, newPrice, newLeaves, leaves, orderSeq)
 }
 
 func (b *Book) unlinkAndFree(side *ladder, idx uint32) {
@@ -1036,9 +1166,9 @@ func (b *Book) unlinkAndFree(side *ladder, idx uint32) {
 	b.freeOrder(idx)
 }
 
-func (b *Book) restLimit(own *ladder, id OrderID, traderID TraderID, side Side, price, qty, leaves int64, orderSeq uint64) {
+func (b *Book) restLimit(own *ladder, tickIdx uint32, id OrderID, traderID TraderID, price, qty, leaves int64, orderSeq uint64) {
 	idx := b.allocOrder()
-	lvl, tickIdx := own.getOrCreate(price)
+	lvl := own.getOrCreateAt(tickIdx, price)
 	tailIdx := lvl.tailIdx
 
 	b.arena[idx] = arenaOrder{
@@ -1051,7 +1181,7 @@ func (b *Book) restLimit(own *ladder, id OrderID, traderID TraderID, side Side, 
 		PrevIdx:  tailIdx,
 		NextIdx:  0,
 		TickIdx:  tickIdx,
-		Side:     side,
+		Side:     own.side,
 		Type:     Limit,
 	}
 
@@ -1108,14 +1238,18 @@ func (b *Book) cancelInternal(id OrderID) Event {
 // CancelOrder cancels an active resting order by ID, appending either
 // EventCancelled(CancelUser) or EventRejected(RejectOrderNotFound) to dst.
 func (b *Book) CancelOrder(id OrderID, dst []Event) []Event {
+	b.assertNotInCallback()
 	return append(dst, b.cancelInternal(id))
 }
 
 // CancelOrderWithCallback cancels an active resting order by ID and streams the
 // resulting event directly to fn.
 func (b *Book) CancelOrderWithCallback(id OrderID, fn func(Event)) {
+	b.assertNotInCallback()
 	ev := b.cancelInternal(id)
 	if fn != nil {
+		b.inCallback = true
+		defer func() { b.inCallback = false }()
 		fn(ev)
 	}
 }
@@ -1210,6 +1344,7 @@ func (b *Book) Config() Config {
 // Reset clears all resting orders and resets sequence counters while retaining
 // pre-allocated arena, ladder, and hash-map storage.
 func (b *Book) Reset() {
+	b.assertNotInCallback()
 	b.bids.reset()
 	b.asks.reset()
 	b.orders.Clear()

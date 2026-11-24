@@ -1,6 +1,7 @@
 package orderbook
 
 import (
+	"math"
 	"math/rand"
 	"testing"
 	"unsafe"
@@ -25,6 +26,9 @@ func TestStructSizesNoscan(t *testing.T) {
 	}
 	if sz := unsafe.Sizeof(mapSlot{}); sz != 16 {
 		t.Fatalf("mapSlot size = %d, want 16", sz)
+	}
+	if sz := unsafe.Sizeof(Event{}); sz != 88 {
+		t.Fatalf("Event size = %d, want 88", sz)
 	}
 }
 
@@ -371,6 +375,306 @@ func BenchmarkBookModifyInPlace(b *testing.B) {
 			b.StopTimer()
 			bk.ModifyOrder(ModifyRequest{ID: 1, NewQty: 1_000_000_000}, evBuf[:0])
 			qty = 1_000_000_000 - 100
+			b.StartTimer()
+		}
+		evBuf = bk.ModifyOrder(ModifyRequest{ID: 1, NewQty: qty}, evBuf[:0])
+	}
+}
+
+func TestCallbackBookStateConsistent(t *testing.T) {
+	b, err := New(testCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Seed a single resting ask #1 (100 @ 10000), then fully fill it via callback.
+	b.PlaceOrder(OrderRequest{ID: 1, TraderID: 1, Side: Sell, Type: Limit, Price: 10000, Qty: 100}, nil)
+
+	var seenTrade, seenDone bool
+	var bidsBuf, asksBuf []DepthLevel
+	b.PlaceOrderWithCallback(OrderRequest{ID: 2, TraderID: 2, Side: Buy, Type: Limit, Price: 10000, Qty: 100}, func(ev Event) {
+		switch ev.Type {
+		case EventTrade:
+			seenTrade = true
+			if p, q, ok := b.BestAsk(); ok {
+				t.Errorf("during EventTrade (full fill): BestAsk = (%d, %d, true), want empty", p, q)
+			}
+			if b.TopOfBook().HasAsk {
+				t.Errorf("during EventTrade (full fill): TopOfBook.HasAsk = true, want false")
+			}
+			if snap, ok := b.GetOrder(1); ok {
+				t.Errorf("during EventTrade (full fill): GetOrder(1) = %+v, want not found", snap)
+			}
+			_, asksBuf = b.Depth(5, bidsBuf, asksBuf)
+			if len(asksBuf) != 0 {
+				t.Errorf("during EventTrade (full fill): Depth asks = %+v, want empty", asksBuf)
+			}
+			if st := b.Stats(); st.ActiveOrders != 0 || st.AskLevels != 0 {
+				t.Errorf("during EventTrade (full fill): Stats = %+v, want 0 active orders and 0 ask levels", st)
+			}
+		case EventDone:
+			if ev.OrderID == 1 {
+				seenDone = true
+				if p, q, ok := b.BestAsk(); ok {
+					t.Errorf("during EventDone: BestAsk = (%d, %d, true), want empty", p, q)
+				}
+				_, asksBuf = b.Depth(5, bidsBuf, asksBuf)
+				if len(asksBuf) != 0 {
+					t.Errorf("during EventDone: Depth asks = %+v, want empty", asksBuf)
+				}
+				if st := b.Stats(); st.ActiveOrders != 0 || st.AskLevels != 0 {
+					t.Errorf("during EventDone: Stats = %+v, want 0 active orders and 0 ask levels", st)
+				}
+			}
+		}
+	})
+	if !seenTrade || !seenDone {
+		t.Fatalf("expected both EventTrade and maker EventDone, got trade=%v done=%v", seenTrade, seenDone)
+	}
+
+	// 2. Non-crossing priority-losing ModifyOrderWithCallback must expose the resting order inside EventModified.
+	b.PlaceOrder(OrderRequest{ID: 10, TraderID: 1, Side: Buy, Type: Limit, Price: 9900, Qty: 200}, nil)
+	var seenMod bool
+	b.ModifyOrderWithCallback(ModifyRequest{ID: 10, NewPrice: 9950, NewQty: 300}, func(ev Event) {
+		if ev.Type != EventModified {
+			return
+		}
+		seenMod = true
+		snap, ok := b.GetOrder(10)
+		if !ok || snap.Price != 9950 || snap.Leaves != 300 {
+			t.Errorf("during EventModified (non-crossing): GetOrder(10) = (%+v, %v), want Price=9950 Leaves=300", snap, ok)
+		}
+		if b.OrderCount() != 1 {
+			t.Errorf("during EventModified (non-crossing): OrderCount = %d, want 1", b.OrderCount())
+		}
+	})
+	if !seenMod {
+		t.Fatalf("expected EventModified callback")
+	}
+}
+
+func TestCallbackReentrancyPanics(t *testing.T) {
+	b, err := New(testCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.PlaceOrder(OrderRequest{ID: 1, TraderID: 1, Side: Sell, Type: Limit, Price: 10000, Qty: 200}, nil)
+
+	assertPanics := func(name string, fn func()) {
+		t.Helper()
+		defer func() {
+			if r := recover(); r == nil {
+				t.Errorf("%s: expected panic on re-entrant mutation during callback, got none", name)
+			}
+		}()
+		fn()
+	}
+
+	assertPanics("PlaceOrder inside PlaceOrderWithCallback", func() {
+		b.PlaceOrderWithCallback(OrderRequest{ID: 2, TraderID: 2, Side: Buy, Type: Limit, Price: 10000, Qty: 100}, func(ev Event) {
+			if ev.Type == EventTrade {
+				b.PlaceOrder(OrderRequest{ID: 3, TraderID: 3, Side: Buy, Type: Limit, Price: 9900, Qty: 100}, nil)
+			}
+		})
+	})
+
+	// After recovering from the panic, the book must not remain locked in callback mode.
+	evs := b.CancelOrder(1, nil)
+	if len(evs) != 1 || evs[0].Type != EventCancelled {
+		t.Fatalf("book should remain usable after recovered re-entrancy panic, got %+v", evs)
+	}
+
+	b.PlaceOrder(OrderRequest{ID: 10, TraderID: 1, Side: Buy, Type: Limit, Price: 9900, Qty: 200}, nil)
+	assertPanics("CancelOrder inside ModifyOrderWithCallback", func() {
+		b.ModifyOrderWithCallback(ModifyRequest{ID: 10, NewQty: 100}, func(ev Event) {
+			b.CancelOrder(10, nil)
+		})
+	})
+
+	assertPanics("Reset inside CancelOrderWithCallback", func() {
+		b.CancelOrderWithCallback(10, func(ev Event) {
+			b.Reset()
+		})
+	})
+}
+
+func TestModifyOrderQtyConsistency(t *testing.T) {
+	runCase := func(t *testing.T, useCallback bool) {
+		b, err := New(testCfg())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var evs []Event
+
+		// Seed Sell #1 (Qty=500 @ 10000), partially fill 200 -> Leaves=300.
+		b.PlaceOrder(OrderRequest{ID: 1, TraderID: 1, Side: Sell, Type: Limit, Price: 10000, Qty: 500}, nil)
+		b.PlaceOrder(OrderRequest{ID: 2, TraderID: 2, Side: Buy, Type: Limit, Price: 10000, Qty: 200}, nil)
+
+		// In-place qty decrease: 300 -> 200.
+		if useCallback {
+			evs = evs[:0]
+			b.ModifyOrderWithCallback(ModifyRequest{ID: 1, NewQty: 200}, func(ev Event) { evs = append(evs, ev) })
+		} else {
+			evs = b.ModifyOrder(ModifyRequest{ID: 1, NewQty: 200}, evs[:0])
+		}
+		if len(evs) != 1 || evs[0].Type != EventModified || evs[0].Qty != 200 || evs[0].Leaves != 200 {
+			t.Fatalf("unexpected EventModified: %+v", evs)
+		}
+
+		snap, ok := b.GetOrder(1)
+		if !ok || snap.Qty != 200 || snap.Leaves != 200 {
+			t.Fatalf("after in-place modify: GetOrder(1) = %+v (ok=%v), want Qty=200 Leaves=200", snap, ok)
+		}
+
+		// Fill remaining 200 -> EventDone for maker #1 must also report Qty=200 (matching priority-losing modify).
+		evs = b.PlaceOrder(OrderRequest{ID: 3, TraderID: 2, Side: Buy, Type: Limit, Price: 10000, Qty: 200}, evs[:0])
+		var makerDone *Event
+		for i := range evs {
+			if evs[i].Type == EventDone && evs[i].OrderID == 1 {
+				makerDone = &evs[i]
+				break
+			}
+		}
+		if makerDone == nil || makerDone.Qty != 200 || makerDone.Leaves != 0 {
+			t.Fatalf("maker EventDone = %+v, want Qty=200 Leaves=0", makerDone)
+		}
+	}
+
+	t.Run("Slice", func(t *testing.T) { runCase(t, false) })
+	t.Run("Callback", func(t *testing.T) { runCase(t, true) })
+}
+
+func TestConfigValidateMaxTicks(t *testing.T) {
+	tooWide := []Config{
+		{Symbol: "WIDE", TickSize: 1, LotSize: 100, MinPrice: 1, MaxPrice: 2_000_000},
+		{Symbol: "MAXINT", TickSize: 1, LotSize: 100, MinPrice: 1, MaxPrice: math.MaxInt64},
+	}
+	for _, cfg := range tooWide {
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("Validate(%+v) = nil, want error for exceeding MaxTicks", cfg)
+		}
+	}
+}
+
+func TestModifySamePriceIncreaseAllPositions(t *testing.T) {
+	run := func(t *testing.T, useCB bool) {
+		b, err := New(testCfg())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var evs []Event
+		modify := func(req ModifyRequest) []Event {
+			evs = evs[:0]
+			if useCB {
+				b.ModifyOrderWithCallback(req, func(ev Event) {
+					if ev.Type == EventModified {
+						snap, ok := b.GetOrder(req.ID)
+						if !ok || snap.Qty != req.NewQty || snap.Leaves != req.NewQty {
+							t.Errorf("inside EventModified: GetOrder(%d) = (%+v, %v), want Qty=Leaves=%d",
+								req.ID, snap, ok, req.NewQty)
+						}
+					}
+					evs = append(evs, ev)
+				})
+			} else {
+				evs = b.ModifyOrder(req, evs)
+			}
+			return evs
+		}
+
+		// Case 1: Sole order on a level (#1: 100 @ 10000 -> 200 @ 10000).
+		b.PlaceOrder(OrderRequest{ID: 1, TraderID: 1, Side: Buy, Type: Limit, Price: 10000, Qty: 100}, nil)
+		origSnap, _ := b.GetOrder(1)
+		out := modify(ModifyRequest{ID: 1, NewQty: 200})
+		if len(out) != 1 || out[0].Type != EventModified || out[0].Qty != 200 || out[0].Leaves != 200 {
+			t.Fatalf("sole order modify: got %+v", out)
+		}
+		newSnap, ok := b.GetOrder(1)
+		if !ok || newSnap.Qty != 200 || newSnap.Leaves != 200 || newSnap.Seq <= origSnap.Seq {
+			t.Fatalf("sole order snapshot = %+v (ok=%v), prevSeq=%d", newSnap, ok, origSnap.Seq)
+		}
+		if _, qty, _ := b.BestBid(); qty != 200 {
+			t.Fatalf("BestBid qty = %d, want 200", qty)
+		}
+
+		// Add #2 (100) and #3 (100) behind #1 -> FIFO order: [#1(200), #2(100), #3(100)].
+		b.PlaceOrder(OrderRequest{ID: 2, TraderID: 2, Side: Buy, Type: Limit, Price: 10000, Qty: 100}, nil)
+		b.PlaceOrder(OrderRequest{ID: 3, TraderID: 3, Side: Buy, Type: Limit, Price: 10000, Qty: 100}, nil)
+
+		// Case 2: Increase head (#1: 200 -> 300) -> FIFO becomes [#2(100), #3(100), #1(300)].
+		modify(ModifyRequest{ID: 1, NewQty: 300})
+		if _, qty, _ := b.BestBid(); qty != 500 {
+			t.Fatalf("after head increase: BestBid qty = %d, want 500", qty)
+		}
+
+		// Case 3: Increase middle (#3: 100 -> 200) -> FIFO becomes [#2(100), #1(300), #3(200)].
+		modify(ModifyRequest{ID: 3, NewQty: 200})
+		if _, qty, _ := b.BestBid(); qty != 600 {
+			t.Fatalf("after middle increase: BestBid qty = %d, want 600", qty)
+		}
+
+		// Case 4: Increase tail (#3: 200 -> 300) -> FIFO stays [#2(100), #1(300), #3(300)].
+		modify(ModifyRequest{ID: 3, NewQty: 300})
+		if _, qty, _ := b.BestBid(); qty != 700 {
+			t.Fatalf("after tail increase: BestBid qty = %d, want 700", qty)
+		}
+
+		// Sweep with Sell 700 @ 10000 and verify exact FIFO fill order: #2, then #1, then #3!
+		fillEvs := b.PlaceOrder(OrderRequest{ID: 99, TraderID: 99, Side: Sell, Type: Limit, Price: 10000, Qty: 700}, nil)
+		var makers []OrderID
+		for _, ev := range fillEvs {
+			if ev.Type == EventTrade {
+				makers = append(makers, ev.MakerOrderID)
+			}
+		}
+		if len(makers) != 3 || makers[0] != 2 || makers[1] != 1 || makers[2] != 3 {
+			t.Fatalf("FIFO fill order = %v, want [2 1 3]", makers)
+		}
+		if b.OrderCount() != 0 {
+			t.Fatalf("OrderCount = %d, want 0", b.OrderCount())
+		}
+	}
+
+	t.Run("Slice", func(t *testing.T) { run(t, false) })
+	t.Run("Callback", func(t *testing.T) { run(t, true) })
+}
+
+func BenchmarkBookAddCancelTick25(b *testing.B) {
+	cfg := Config{Symbol: "BBCA", TickSize: 25, LotSize: 100, MinPrice: 5000, MaxPrice: 15000, InitialCapacity: 8192}
+	bk, err := New(cfg)
+	if err != nil {
+		b.Fatal(err)
+	}
+	// Rest an opposite ask so wouldCross inspects a live level.
+	bk.PlaceOrder(OrderRequest{ID: 1, TraderID: 1, Side: Sell, Type: Limit, Price: 10050, Qty: 100}, nil)
+	evBuf := make([]Event, 0, 16)
+	var id OrderID = 2
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		evBuf = bk.PlaceOrder(OrderRequest{ID: id, TraderID: 2, Side: Buy, Type: Limit, Price: 10000, Qty: 100}, evBuf[:0])
+		evBuf = bk.CancelOrder(id, evBuf[:0])
+		id++
+	}
+}
+
+func BenchmarkBookModifyQtyIncrease(b *testing.B) {
+	cfg := Config{Symbol: "BBCA", TickSize: 25, LotSize: 100, MinPrice: 5000, MaxPrice: 15000, InitialCapacity: 8192}
+	bk, _ := New(cfg)
+	evBuf := make([]Event, 0, 16)
+	// Two orders at 10000 so increasing #1 moves it behind #2 (exercising queue tail move).
+	bk.PlaceOrder(OrderRequest{ID: 1, TraderID: 1, Side: Buy, Type: Limit, Price: 10000, Qty: 100}, evBuf[:0])
+	bk.PlaceOrder(OrderRequest{ID: 2, TraderID: 2, Side: Buy, Type: Limit, Price: 10000, Qty: 100}, evBuf[:0])
+	bk.PlaceOrder(OrderRequest{ID: 3, TraderID: 3, Side: Sell, Type: Limit, Price: 10050, Qty: 100}, evBuf[:0])
+	qty := int64(100)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		qty += 100
+		if qty > 1_000_000_000 {
+			b.StopTimer()
+			bk.ModifyOrder(ModifyRequest{ID: 1, NewQty: 100}, evBuf[:0])
+			qty = 200
 			b.StartTimer()
 		}
 		evBuf = bk.ModifyOrder(ModifyRequest{ID: 1, NewQty: qty}, evBuf[:0])

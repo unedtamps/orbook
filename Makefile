@@ -1,4 +1,4 @@
-.PHONY: test test-short bench bench-quick bench-cmp profile-cpu profile-mem latency latency-detailed demo fuzz report report-quick report-one report-serve clean
+.PHONY: test test-short lint bench bench-quick bench-cmp profile-cpu profile-mem latency latency-detailed demo fuzz report report-quick report-one report-serve clean
 
 PROFILE_DIR  := profiles
 BENCH        ?= BenchmarkMixedWorkload/ladder_linkedlist_pool
@@ -14,6 +14,9 @@ test:
 
 test-short:
 	go test -race ./...
+
+lint:
+	go run ./cmd/lintcomments -root .
 
 bench:
 	go test -run=^$$ -bench=. -benchmem -benchtime=$(BENCHTIME) -count=$(COUNT) ./bench/...
